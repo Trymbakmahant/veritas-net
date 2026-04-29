@@ -1,0 +1,26 @@
+{
+  "name": "veritas-net",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "workspaces": [
+    "contract",
+    "backend",
+    "agents/*",
+    "frontend"
+  ],
+  "scripts": {
+    "build:contracts": "npm --workspace contract run build",
+    "deploy:zg":       "npm --workspace contract run deploy:zg",
+    "deploy:local":    "npm --workspace contract run deploy:local",
+    "dev:github":      "npm --workspace veritas-github-agent run dev",
+    "dev:snapshot":    "npm --workspace veritas-snapshot-agent run dev",
+    "dev:auditor":     "npm --workspace veritas-adversarial-auditor-agent run dev",
+    "dev:backend":     "npm --workspace veritas-backend run dev",
+    "dev:agents":      "concurrently -n github,snapshot,auditor -c blue,green,magenta \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\"",
+    "dev:all":         "concurrently -n github,snapshot,auditor,backend -c blue,green,magenta,yellow \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\" \"npm:dev:backend\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

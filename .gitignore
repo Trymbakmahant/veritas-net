@@ -20,6 +20,9 @@ coverage.json
 !.env.example
 !.env*.example
 
+# Local-only launch guide (fill with your keys; do not commit)
+READY_TO_LAUNCH.md
+
 # Logs & debug
 logs/
 *.log

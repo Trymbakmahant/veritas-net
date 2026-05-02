@@ -22,6 +22,7 @@ import { axl, axlMode, Channels } from "./axl.js";
 import { identityFor, reputationOf, setupINFT } from "./inft.js";
 import { AgentRegistry, envFallback } from "./registry.js";
 import type { RegistryEntry } from "./types.js";
+import { AgentManifestSchema } from "./types.js";
 import { buildAndPinProof, signVote } from "./proof.js";
 import {
   appendLog,
@@ -365,6 +366,36 @@ async function main() {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
 
+  // Permissive CORS for the dashboard / dev tooling. Tighten via CORS_ALLOWED_ORIGIN
+  // (comma list, e.g. "http://localhost:3000,https://veritas.example") in production.
+  const corsAllowed = (process.env.CORS_ALLOWED_ORIGIN ?? "*")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin as string | undefined;
+    const allow =
+      corsAllowed.includes("*")
+        ? "*"
+        : origin && corsAllowed.includes(origin)
+        ? origin
+        : "";
+    if (allow) {
+      res.setHeader("access-control-allow-origin", allow);
+      res.setHeader("vary", "origin");
+      res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+      res.setHeader(
+        "access-control-allow-headers",
+        "content-type,authorization",
+      );
+    }
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   app.get("/health", (_req, res) =>
     res.json({
       ok: true,
@@ -407,6 +438,47 @@ async function main() {
     try {
       await registry.refresh();
       res.json({ ok: true, count: registry.list().length });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  /**
+   * Pin an AgentManifest JSON to 0G Storage and return the resulting URI + hash.
+   * The dashboard's "register your agent" flow calls this from the browser,
+   * then the user's wallet calls `OracleINFT.registerOracle(...)` directly.
+   *
+   * NOTE: anyone can hit this. It only stores a JSON blob (no on-chain side
+   * effects), so spam costs are bounded by the indexer / mock-pin disk.
+   */
+  app.post("/v1/manifests", async (req, res) => {
+    try {
+      const parsed = AgentManifestSchema.parse(req.body);
+      const uri = await pinJson(parsed);
+      const canon = JSON.stringify(parsed);
+      const hash = ethers.keccak256(ethers.toUtf8Bytes(canon));
+      res.json({ uri, hash, manifest: parsed });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  /**
+   * Convenience: surfaces the on-chain addresses + chain id the dashboard needs
+   * to wire the user's wallet to the right OracleINFT.
+   */
+  app.get("/v1/config", async (_req, res) => {
+    try {
+      const chainId = provider ? (await provider.getNetwork()).chainId.toString() : null;
+      res.json({
+        chainId,
+        rpcUrl: RPC_URL || null,
+        contracts: {
+          OracleINFT: INFT_ADDRESS || null,
+          VeritasOracle: ORACLE_ADDRESS || null,
+        },
+        modes: { axl: axlMode, zgStorage: zgMode, zgKv: zgKvReal ? "real" : "mock", zgCompute: zgComputeMode },
+      });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
     }

@@ -59,10 +59,19 @@ contract OracleINFT is IOracleINFT {
 
     uint256 public nextTokenId = 1;
 
+    // ---- Permissionless registration ----------------------------------------
+
+    /// @notice Optional anti-spam fee for `registerOracle`. Set by deployer.
+    ///         Default 0 (free on testnet); production deployments should set
+    ///         a small bond to discourage spam ENS squatting.
+    uint256 public registrationFee;
+
     // ---- Events --------------------------------------------------------------
 
     event Minted(uint256 indexed tokenId, address indexed owner, string ens, string bundleUri, bytes32 bundleHash);
+    event Registered(uint256 indexed tokenId, address indexed owner, string ens, string manifestUri, bytes32 manifestHash);
     event Upgraded(uint256 indexed tokenId, uint64 newVersion, string newBundleUri, bytes32 newBundleHash);
+    event RegistrationFeeUpdated(uint256 newFee);
     event ReputationBumped(uint256 indexed tokenId, int256 delta, int256 newScore, uint256 indexed claimId);
     event SplitsUpdated(uint256 indexed tokenId);
     event TransferRequested(uint256 indexed tokenId, address indexed from, address indexed to);
@@ -77,6 +86,7 @@ contract OracleINFT is IOracleINFT {
     error EnsTaken();
     error UnknownToken();
     error BadSplits();
+    error InsufficientFee();
 
     constructor(string memory _name, string memory _symbol) {
         name = _name;
@@ -92,6 +102,11 @@ contract OracleINFT is IOracleINFT {
     function setVeritasOracle(address _v) external onlyDeployer {
         veritasOracle = _v;
         emit VeritasOracleUpdated(_v);
+    }
+
+    function setRegistrationFee(uint256 fee) external onlyDeployer {
+        registrationFee = fee;
+        emit RegistrationFeeUpdated(fee);
     }
 
     // ---- Mint / upgrade ------------------------------------------------------
@@ -129,6 +144,84 @@ contract OracleINFT is IOracleINFT {
 
         emit Minted(tokenId, to, ens, bundleUri, bundleHash);
         emit SplitsUpdated(tokenId);
+    }
+
+    /// @notice Permissionless registration: any caller can mint themselves an
+    ///         oracle iNFT by providing a manifest pinned to 0G Storage.
+    ///
+    ///         Differences from `mint`:
+    ///           * caller (msg.sender) becomes the owner;
+    ///           * caller pays `registrationFee` (default 0);
+    ///           * royalty splits default to 100% caller if `recipients` empty.
+    ///
+    ///         The manifest at `manifestUri` SHOULD be a JSON document matching
+    ///         the off-chain `AgentManifest` schema (name, endpoint, capabilities,
+    ///         signer, version). The coordinator fetches it from 0G Storage at
+    ///         registry-load time.
+    function registerOracle(
+        string calldata ens,
+        string calldata manifestUri,
+        bytes32 manifestHash,
+        bytes calldata capabilities,
+        address[] calldata recipients,
+        uint16[]  calldata bps
+    ) external payable returns (uint256 tokenId) {
+        if (msg.value < registrationFee) revert InsufficientFee();
+        if (tokenIdByEnsHash[keccak256(bytes(ens))] != 0) revert EnsTaken();
+
+        tokenId = nextTokenId++;
+        _writeOracle(tokenId, msg.sender, ens, manifestUri, manifestHash, capabilities);
+        _setRegisterSplits(tokenId, recipients, bps);
+
+        emit Registered(tokenId, msg.sender, ens, manifestUri, manifestHash);
+        emit Minted(tokenId, msg.sender, ens, manifestUri, manifestHash);
+        emit SplitsUpdated(tokenId);
+    }
+
+    function _writeOracle(
+        uint256 tokenId,
+        address to,
+        string calldata ens,
+        string calldata bundleUri,
+        bytes32 bundleHash,
+        bytes calldata capabilities
+    ) internal {
+        ownerOf[tokenId] = to;
+        oracles[tokenId] = Oracle({
+            ens: ens,
+            bundleUri: bundleUri,
+            bundleHash: bundleHash,
+            version: 1,
+            capabilities: capabilities
+        });
+        tokenIdByEnsHash[keccak256(bytes(ens))] = tokenId;
+        _intelligentData[tokenId].push(IntelligentData({
+            dataDescription: "veritas-agent-manifest",
+            dataHash: bundleHash
+        }));
+    }
+
+    function _setRegisterSplits(
+        uint256 tokenId,
+        address[] calldata recipients,
+        uint16[] calldata bps
+    ) internal {
+        if (recipients.length == 0) {
+            address[] memory r = new address[](1);
+            uint16[] memory b = new uint16[](1);
+            r[0] = msg.sender;
+            b[0] = 10_000;
+            _splits[tokenId] = Splits({recipients: r, bps: b});
+        } else {
+            _validateSplits(recipients, bps);
+            address[] memory r = new address[](recipients.length);
+            uint16[] memory b = new uint16[](bps.length);
+            for (uint256 i = 0; i < recipients.length; i++) {
+                r[i] = recipients[i];
+                b[i] = bps[i];
+            }
+            _splits[tokenId] = Splits({recipients: r, bps: b});
+        }
     }
 
     /// @notice Owner-gated upgrade of the encrypted bundle (skill / policy / memory).

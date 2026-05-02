@@ -1,0 +1,10 @@
+{
+  "schema": "veritas.agent.v1",
+  "name": "github",
+  "displayName": "GitHub PR-merge oracle",
+  "endpoint": "http://localhost:8801",
+  "capabilities": ["github_pr_merged_before"],
+  "description": "Verifies whether a PR was merged before a deadline using the GitHub REST API.",
+  "signer": "0x0000000000000000000000000000000000000000",
+  "version": "0.1.0"
+}

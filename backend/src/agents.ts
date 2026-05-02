@@ -1,4 +1,4 @@
-import { AgentRequest, AgentResponse, AgentResponseSchema } from "./types.js";
+import { AgentManifest, AgentRequest, AgentResponse, AgentResponseSchema } from "./types.js";
 
 async function postJson(url: string, body: unknown, headers?: Record<string, string>) {
   const res = await fetch(url, {
@@ -24,6 +24,17 @@ export async function callGithubAgent(agentUrl: string, req: AgentRequest, githu
 
 export async function callSnapshotAgent(agentUrl: string, req: AgentRequest): Promise<AgentResponse> {
   const json = await postJson(`${agentUrl.replace(/\/$/, "")}/verify`, req);
+  return AgentResponseSchema.parse(json);
+}
+
+/**
+ * Generic dispatcher used by the dynamic registry. Posts AgentRequest to
+ * `${manifest.endpoint}/verify`, optionally with a per-manifest auth header.
+ */
+export async function callAgentByManifest(manifest: AgentManifest, req: AgentRequest): Promise<AgentResponse> {
+  const headers: Record<string, string> = {};
+  if (manifest.authHeader) headers["authorization"] = manifest.authHeader;
+  const json = await postJson(`${manifest.endpoint.replace(/\/$/, "")}/verify`, req, headers);
   return AgentResponseSchema.parse(json);
 }
 

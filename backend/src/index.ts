@@ -13,12 +13,15 @@ import {
 } from "./types.js";
 import {
   callAuditorAgent,
+  callAgentByManifest,
   callGithubAgent,
   callSnapshotAgent,
 } from "./agents.js";
 import { decide, votePayloadFromResponse } from "./coordinator.js";
 import { axl, axlMode, Channels } from "./axl.js";
 import { identityFor, reputationOf, setupINFT } from "./inft.js";
+import { AgentRegistry, envFallback } from "./registry.js";
+import type { RegistryEntry } from "./types.js";
 import { buildAndPinProof, signVote } from "./proof.js";
 import {
   appendLog,
@@ -77,41 +80,94 @@ function parseSpec(specRaw: string) {
 // and (if AXL is on) re-publishes on `veritas/vote/<claimId>` so any peer/dashboard
 // can subscribe. In mock AXL mode this is a single-process pub/sub bus; in real
 // AXL mode it becomes a P2P broadcast.
+//
+// Selection is **registry-driven**: at boot we walk OracleINFT, fetch each agent's
+// AgentManifest from 0G Storage, and index by `capabilities`. Dispatch picks the
+// top-N entries by reputation that can answer `spec.kind`. If nothing is registered
+// for a capability we fall back to the hardcoded GITHUB/SNAPSHOT URLs so existing
+// dev loops keep working.
 
-type AgentName = "github" | "snapshot";
+const registry = new AgentRegistry(envFallback());
 
-async function callAgent(name: AgentName, req: AgentRequest): Promise<AgentResponse> {
-  if (name === "github") return callGithubAgent(GITHUB_AGENT_URL, req, GITHUB_TOKEN || undefined);
-  return callSnapshotAgent(SNAPSHOT_AGENT_URL, req);
-}
-
-function pickAgentSet(spec: AgentRequest["spec"]): AgentName[] {
-  // Each spec.kind has a primary agent. We call it twice plus the auditor as a critic.
-  // Replace this with a real swarm-selection policy later (e.g. iNFT capability filter).
-  if (spec.kind === "github_pr_merged_before") return ["github", "github"];
-  return ["snapshot", "snapshot"];
+function pickRegistry(spec: AgentRequest["spec"]): RegistryEntry[] {
+  return registry.pickFor(spec.kind, 2);
 }
 
 async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signer) {
-  const agentSet = pickAgentSet(req.spec);
+  const entries = pickRegistry(req.spec);
 
   // Publish dispatch on AXL (informational; in mock mode there are no remote subs).
   await axl.publish(Channels.claimDispatch, { claimId: claimId.toString(), request: req });
 
   const responses: Array<AgentResponse & { identity: OracleIdentity; reputation?: number }> = [];
 
-  // Fetch identities + reputations in parallel.
-  const identities = await Promise.all(agentSet.map((n, i) => identityFor(`${n}#${i}` ).then(async (id) => {
-    const baseId = await identityFor(n);
-    // Use the canonical (unsuffixed) identity; the suffix is just to keep the loop unique.
-    const rep = await reputationOf(baseId.tokenId);
-    return { name: n, identity: baseId, reputation: rep };
+  // ---- Path A: registry-backed dispatch ---------------------------------
+  if (entries.length > 0) {
+    await Promise.all(
+      entries.map(async (entry) => {
+        const identity: OracleIdentity = {
+          tokenId: entry.tokenId,
+          ens: entry.ens,
+          version: entry.version,
+        };
+        try {
+          const resp = await callAgentByManifest(entry.manifest, req);
+          responses.push({ ...resp, identity, reputation: entry.reputation });
+          const vote = await signVote({
+            signer,
+            tokenId: identity.tokenId,
+            claimId,
+            outcome: resp.outcome,
+            resolvable: resp.resolvable,
+            confidence: resp.confidence,
+            reasoning: resp.reasoning,
+            evidence: resp.evidence,
+            zgReceipt: resp.zgReceipt,
+          });
+          await axl.publish(Channels.vote(claimId), {
+            ...vote,
+            tokenId: vote.tokenId.toString(),
+            claimId: vote.claimId.toString(),
+          });
+          await appendLog(ZgStreams.claimAgentResponses(claimId.toString()), {
+            ens: identity.ens,
+            tokenId: identity.tokenId.toString(),
+            ...resp,
+          });
+        } catch (e) {
+          responses.push({
+            agent: entry.manifest.name,
+            resolvable: false,
+            outcome: "INVALID" as Outcome,
+            confidence: 0.2,
+            evidence: [],
+            reasoning: `Agent call failed: ${(e as Error).message}`,
+            identity,
+            reputation: entry.reputation,
+          });
+        }
+      }),
+    );
+    return responses;
+  }
+
+  // ---- Path B: legacy hardcoded fallback (no registered agent matched) --
+  type AgentName = "github" | "snapshot";
+  const fallbackSet: AgentName[] = req.spec.kind === "github_pr_merged_before"
+    ? ["github", "github"]
+    : ["snapshot", "snapshot"];
+
+  const identities = await Promise.all(fallbackSet.map((n) => identityFor(n).then(async (id) => {
+    const rep = await reputationOf(id.tokenId);
+    return { name: n, identity: id, reputation: rep };
   })));
 
   await Promise.all(
     identities.map(async ({ name, identity, reputation }) => {
       try {
-        const resp = await callAgent(name, req);
+        const resp = name === "github"
+          ? await callGithubAgent(GITHUB_AGENT_URL, req, GITHUB_TOKEN || undefined)
+          : await callSnapshotAgent(SNAPSHOT_AGENT_URL, req);
         responses.push({ ...resp, identity, reputation });
         const vote = await signVote({
           signer,
@@ -135,15 +191,13 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
           ...resp,
         });
       } catch (e) {
-        // Agent down or refused. Synthesize an INVALID response so consensus continues.
-        const reasoning = `Agent call failed: ${(e as Error).message}`;
         responses.push({
           agent: name,
           resolvable: false,
           outcome: "INVALID" as Outcome,
           confidence: 0.2,
           evidence: [],
-          reasoning,
+          reasoning: `Agent call failed: ${(e as Error).message}`,
           identity,
           reputation,
         });
@@ -293,6 +347,8 @@ async function main() {
     : null;
 
   if (provider && INFT_ADDRESS) setupINFT(provider, INFT_ADDRESS);
+  registry.attach(provider, INFT_ADDRESS);
+  await registry.whenReady();
 
   // Self-announce on AXL discovery (mock mode = noop, real mode = mesh discovery).
   await axl.publish(Channels.discovery, {
@@ -315,8 +371,41 @@ async function main() {
         zgCompute: zgComputeMode,
       },
       onChain: !!contract,
+      registeredAgents: registry.list().length,
     }),
   );
+
+  app.get("/v1/agents", (_req, res) => {
+    res.json({
+      count: registry.list().length,
+      agents: registry.list().map((e) => ({
+        tokenId: e.tokenId.toString(),
+        ens: e.ens,
+        owner: e.owner,
+        version: e.version,
+        reputation: e.reputation,
+        bundleUri: e.bundleUri,
+        manifest: {
+          name: e.manifest.name,
+          displayName: e.manifest.displayName,
+          endpoint: e.manifest.endpoint,
+          capabilities: e.manifest.capabilities,
+          version: e.manifest.version,
+          description: e.manifest.description,
+          signer: e.manifest.signer,
+        },
+      })),
+    });
+  });
+
+  app.post("/v1/agents/refresh", async (_req, res) => {
+    try {
+      await registry.refresh();
+      res.json({ ok: true, count: registry.list().length });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
 
   app.post("/v1/verify", async (req, res) => {
     try {

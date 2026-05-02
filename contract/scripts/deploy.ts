@@ -61,20 +61,36 @@ async function main() {
   console.log("Wired VeritasOracle <-> OracleINFT");
 
   // ---- 5. Mint starter swarm ---------------------------------------------
+  //
+  // bundleUri can be either:
+  //   - `0g://<root>` (preferred; manifest pinned to 0G Storage), or
+  //   - `https://...` (any reachable JSON manifest), or
+  //   - a placeholder URI (registry will fall back to AGENT_ENDPOINTS env).
+  //
+  // The starter swarm uses `https://` URIs so the deploy script doesn't need
+  // 0G Storage credentials. Anyone can later upgrade their bundleUri via
+  // `OracleINFT.upgradeBundle(...)` once they pin a real manifest.
+  const manifestBaseUrl = process.env.STARTER_MANIFEST_BASE_URL ?? "";
   const starterSwarm = [
     {
       ens: "github.veritas.eth",
-      bundleUri: "0g://placeholder/github-agent-v1",
+      bundleUri: manifestBaseUrl
+        ? `${manifestBaseUrl}/github.veritas.eth.json`
+        : "0g://placeholder/github-agent-v1",
       capabilities: "github_pr_merged_before",
     },
     {
       ens: "snapshot.veritas.eth",
-      bundleUri: "0g://placeholder/snapshot-agent-v1",
+      bundleUri: manifestBaseUrl
+        ? `${manifestBaseUrl}/snapshot.veritas.eth.json`
+        : "0g://placeholder/snapshot-agent-v1",
       capabilities: "snapshot_proposal_passed",
     },
     {
       ens: "auditor.veritas.eth",
-      bundleUri: "0g://placeholder/adversarial-auditor-v1",
+      bundleUri: manifestBaseUrl
+        ? `${manifestBaseUrl}/auditor.veritas.eth.json`
+        : "0g://placeholder/adversarial-auditor-v1",
       capabilities: "critic",
     },
   ];

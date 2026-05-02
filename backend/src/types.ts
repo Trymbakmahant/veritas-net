@@ -108,6 +108,43 @@ export type OracleIdentity = {
   reputation?: number;
 };
 
+// ---------- Agent manifest (pinned to 0G Storage) ---------------------------
+//
+// Every oracle iNFT points (via `bundleUri`) at a JSON document matching this
+// schema. The coordinator fetches the manifest at registry-load time so it can
+// dispatch claims to live HTTP endpoints based on declared capabilities.
+
+export const AgentManifestSchema = z.object({
+  schema: z.literal("veritas.agent.v1"),
+  /** short slug; ENS will be `${name}.veritas.eth` */
+  name: z.string().min(1).regex(/^[a-z0-9][a-z0-9-]*$/i, "lowercase alphanum + dashes"),
+  displayName: z.string().min(1).optional(),
+  /** HTTPS endpoint that exposes POST /verify (and GET /health). */
+  endpoint: z.string().url(),
+  /** Claim-spec kinds this agent can answer (matches `ClaimSpec.kind`). */
+  capabilities: z.array(z.string().min(1)).min(1),
+  description: z.string().optional(),
+  /** Address of the key the agent will sign AgentResponses with (future use). */
+  signer: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  version: z.string().min(1),
+  /** Optional auth header passed by the coordinator when calling the endpoint. */
+  authHeader: z.string().optional(),
+  /** Free-form extra metadata. */
+  extra: z.record(z.unknown()).optional(),
+});
+export type AgentManifest = z.infer<typeof AgentManifestSchema>;
+
+/** A live registry entry: on-chain identity joined with off-chain manifest. */
+export type RegistryEntry = {
+  tokenId: bigint;
+  ens: string;
+  owner: `0x${string}`;
+  version: number;
+  bundleUri: string;
+  reputation: number;
+  manifest: AgentManifest;
+};
+
 // ---------- Final proof bundle (pinned to 0G Storage) -----------------------
 
 export type ProofBundle = {

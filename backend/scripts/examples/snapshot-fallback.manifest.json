@@ -1,0 +1,10 @@
+{
+  "schema": "veritas.agent.v1",
+  "name": "snapshot",
+  "displayName": "Snapshot proposal oracle",
+  "endpoint": "http://localhost:8802",
+  "capabilities": ["snapshot_proposal_passed"],
+  "description": "Verifies whether a Snapshot proposal passed using the Snapshot HTTP API.",
+  "signer": "0x0000000000000000000000000000000000000000",
+  "version": "0.1.0"
+}

@@ -171,8 +171,49 @@ class HybridZgBackend {
     return `0g://${root}`;
   }
 
-  async fetchPinned<T = unknown>(_uri: string): Promise<T | null> {
-    return null;
+  async fetchPinned<T = unknown>(uri: string): Promise<T | null> {
+    if (!uri) return null;
+    if (uri.startsWith("mock-0g://")) return null; // mock backend pins are local
+    if (uri.startsWith("http://") || uri.startsWith("https://")) {
+      try {
+        const res = await fetch(uri);
+        if (!res.ok) return null;
+        return (await res.json()) as T;
+      } catch {
+        return null;
+      }
+    }
+    if (!uri.startsWith("0g://")) return null;
+    const root = uri.slice("0g://".length);
+
+    await this.sdk();
+    // Prefer in-memory download when SDK supports it.
+    const indexer: any = this.indexer;
+    if (typeof indexer.downloadToBlob === "function") {
+      try {
+        const [blob, err] = await indexer.downloadToBlob(root, { proof: true });
+        if (err || !blob) return null;
+        const text = await blob.text();
+        return JSON.parse(text) as T;
+      } catch {
+        // fall through to disk path
+      }
+    }
+    // Disk path: download, read, unlink.
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const os = await import("node:os");
+    const tmp = path.join(os.tmpdir(), `veritas-zg-${root.replace(/[^a-z0-9]/gi, "")}.json`);
+    try {
+      const err = await indexer.download(root, tmp, true);
+      if (err) return null;
+      const buf = await fs.readFile(tmp);
+      return JSON.parse(buf.toString("utf-8")) as T;
+    } catch {
+      return null;
+    } finally {
+      try { await fs.unlink(tmp); } catch { /* ignore */ }
+    }
   }
 }
 

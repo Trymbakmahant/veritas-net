@@ -1,5 +1,6 @@
 import express from "express";
 import { z } from "zod";
+import { startAxlAgent } from "../../shared/axl-agent.js";
 
 const PORT = Number(process.env.PORT ?? "8801");
 
@@ -49,37 +50,47 @@ function asDate(iso: string) {
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/health", (_req, res) => res.json({ ok: true, agent: "github-agent" }));
+async function verifyGithub(raw: unknown, githubToken?: string) {
+  const parsed = RequestSchema.parse(raw);
+
+  const deadline = asDate(parsed.spec.deadlineIso);
+  const { url, data } = await fetchPr(parsed.spec.repo, parsed.spec.prNumber, githubToken);
+
+  const mergedAt = data.merged_at ? asDate(data.merged_at) : null;
+
+  const resolvable = true;
+  const outcome = mergedAt && mergedAt.getTime() <= deadline.getTime()
+    ? "YES" as const
+    : "NO" as const;
+
+  const reasoning = mergedAt
+    ? `PR merged at ${mergedAt.toISOString()} (deadline ${deadline.toISOString()}).`
+    : `PR not merged (merged_at is null). State=${data.state}, closed_at=${data.closed_at ?? "null"}.`;
+
+  return {
+    agent: "github-agent",
+    resolvable,
+    outcome,
+    confidence: 0.9,
+    evidence: [
+      { type: "github_api", uri: url },
+      { type: "github_html", uri: data.html_url }
+    ],
+    reasoning
+  };
+}
+
+app.get("/health", (_req, res) => res.json({
+  ok: true,
+  agent: "github-agent",
+  axl: !!process.env.AXL_HTTP_URL,
+}));
 
 app.post("/verify", async (req, res) => {
   try {
-    const parsed = RequestSchema.parse(req.body);
     const token = (req.headers.authorization as string | undefined) ?? undefined;
 
-    const deadline = asDate(parsed.spec.deadlineIso);
-    const { url, data } = await fetchPr(parsed.spec.repo, parsed.spec.prNumber, token);
-
-    const mergedAt = data.merged_at ? asDate(data.merged_at) : null;
-
-    const resolvable = true;
-    const outcome =
-      mergedAt && mergedAt.getTime() <= deadline.getTime() ? "YES" : "NO";
-
-    const reasoning = mergedAt
-      ? `PR merged at ${mergedAt.toISOString()} (deadline ${deadline.toISOString()}).`
-      : `PR not merged (merged_at is null). State=${data.state}, closed_at=${data.closed_at ?? "null"}.`;
-
-    res.json({
-      agent: "github-agent",
-      resolvable,
-      outcome,
-      confidence: 0.9,
-      evidence: [
-        { type: "github_api", uri: url },
-        { type: "github_html", uri: data.html_url }
-      ],
-      reasoning
-    });
+    res.json(await verifyGithub(req.body, token));
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
   }
@@ -87,5 +98,11 @@ app.post("/verify", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`GitHub agent listening on :${PORT}`);
+});
+
+startAxlAgent({
+  agentName: "github-agent",
+  capabilities: ["github_pr_merged_before"],
+  verify: (req) => verifyGithub(req, process.env.GITHUB_TOKEN || undefined),
 });
 

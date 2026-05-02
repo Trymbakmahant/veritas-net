@@ -21,7 +21,7 @@
     "dev:axl":         "npm --workspace veritas-backend run dev:axl",
     "dev:agents":      "concurrently -n github,snapshot,auditor -c blue,green,magenta \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\"",
     "dev:all":         "concurrently -n github,snapshot,auditor,backend -c blue,green,magenta,yellow \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\" \"npm:dev:backend\"",
-    "dev:full":        "concurrently -n axl,github,snapshot,auditor,backend,frontend -c gray,blue,green,magenta,yellow,cyan \"npm:dev:axl\" \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\" \"AXL_HTTP_URL=http://localhost:8765 npm --workspace veritas-backend run dev\" \"npm:dev:frontend\""
+    "dev:full":        "concurrently -n axl,github,snapshot,auditor,backend,frontend -c gray,blue,green,magenta,yellow,cyan \"npm:dev:axl\" \"AXL_HTTP_URL=http://localhost:8765 AXL_PEER_ID=github-agent npm:dev:github\" \"AXL_HTTP_URL=http://localhost:8765 AXL_PEER_ID=snapshot-agent npm:dev:snapshot\" \"npm:dev:auditor\" \"AXL_HTTP_URL=http://localhost:8765 AXL_PEER_ID=local-coordinator npm --workspace veritas-backend run dev\" \"npm:dev:frontend\""
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

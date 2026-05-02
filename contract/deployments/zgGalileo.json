@@ -1,0 +1,29 @@
+{
+  "network": "zgGalileo",
+  "chainId": 16602,
+  "deployer": "0x554C9c829eD5f3a56F3374FC99eE3dE2d627DE32",
+  "resolver": "0x554C9c829eD5f3a56F3374FC99eE3dE2d627DE32",
+  "contracts": {
+    "OracleINFT": "0x3470401D253BF4Ab93d7a3Fdcc9052d6470C31E9",
+    "VeritasOracle": "0x87491422A7DB6561D7Ed2dF7eeCaC0373C961A10",
+    "RoyaltyRouter": "0x7e32c34c105faC15526AA682Ef5db1a186eb4621"
+  },
+  "oracles": [
+    {
+      "ens": "github.veritas.eth",
+      "tokenId": 1,
+      "bundleUri": "0g://placeholder/github-agent-v1"
+    },
+    {
+      "ens": "snapshot.veritas.eth",
+      "tokenId": 2,
+      "bundleUri": "0g://placeholder/snapshot-agent-v1"
+    },
+    {
+      "ens": "auditor.veritas.eth",
+      "tokenId": 3,
+      "bundleUri": "0g://placeholder/adversarial-auditor-v1"
+    }
+  ],
+  "deployedAtIso": "2026-05-02T07:56:19.904Z"
+}

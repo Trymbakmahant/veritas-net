@@ -59,11 +59,16 @@ const ABI = [
   "event ConsumerRegistered(uint256 indexed claimId, address indexed consumer)",
   "event ClaimResolved(uint256 indexed claimId, uint8 outcome, uint64 resolvedAt, string proofUri, uint256[] participants)",
   "event ConsumerNotified(uint256 indexed claimId, address indexed consumer, bool ok, bytes returnData)",
+  "event ClaimDisputed(uint256 indexed claimId, address indexed disputer, uint256 bond, uint64 disputedAt)",
+  "event ClaimReResolved(uint256 indexed claimId, uint8 outcome, string proofUri, bool flipped, uint256 bondRefunded, uint256[] participants)",
   "function resolveClaim(uint256 claimId, uint8 outcome, string proofUri, uint256[] participants, bool[] agreed) external",
-  "function claims(uint256) view returns (address requester,uint64 resolveBy,uint64 resolvedAt,uint8 outcome,string text,string spec,string proofUri,address consumer)",
+  "function reResolve(uint256 claimId, uint8 outcome, string proofUri, uint256[] participants, bool[] agreed) external",
+  "function claims(uint256) view returns (address requester,uint64 resolveBy,uint64 resolvedAt,uint8 outcome,string text,string spec,string proofUri,address consumer,address disputer,uint96 disputeBondLocked,uint64 disputedAt)",
   "function nextClaimId() view returns (uint256)",
   "function submitClaim(string text, string spec, uint64 resolveBy) external returns (uint256)",
   "function submitClaimWithConsumer(string text, string spec, uint64 resolveBy, address consumer) external returns (uint256)",
+  "function disputeBond() view returns (uint256)",
+  "function disputeWindow() view returns (uint64)",
 ];
 
 const OUTCOME_NAMES = ["NO", "YES", "INVALID", "ESCALATE"] as const;
@@ -240,6 +245,8 @@ async function resolveOnce(args: {
   specRaw: string;
   signer: ethers.Signer;
   contract: ethers.Contract;
+  /** When true, calls reResolve instead of resolveClaim (after a dispute). */
+  reResolve?: boolean;
 }) {
   const spec = parseSpec(args.specRaw);
   const req: AgentRequest = AgentRequestSchema.parse({
@@ -315,7 +322,8 @@ async function resolveOnce(args: {
 
   let txHash: string | undefined;
   try {
-    const tx = await args.contract.resolveClaim(
+    const fn = args.reResolve ? args.contract.reResolve : args.contract.resolveClaim;
+    const tx = await fn(
       args.claimId,
       outcomeToEnum(final.outcome),
       proofUri,
@@ -325,7 +333,8 @@ async function resolveOnce(args: {
     const rcpt = await tx.wait();
     txHash = rcpt?.hash ?? tx.hash;
   } catch (e) {
-    console.warn(`resolveClaim on-chain submit failed (${(e as Error).message}); proof bundle was still pinned.`);
+    const which = args.reResolve ? "reResolve" : "resolveClaim";
+    console.warn(`${which} on-chain submit failed (${(e as Error).message}); proof bundle was still pinned.`);
   }
 
   await axl.publish(Channels.reputationGossip, {
@@ -585,6 +594,33 @@ async function main() {
     }
   });
 
+  /** Manual re-resolve trigger (the chain listener also auto-runs this on ClaimDisputed). */
+  app.post("/v1/reresolve/:claimId", async (req, res) => {
+    if (!contract) {
+      return res.status(400).json({ error: "Backend not configured for on-chain." });
+    }
+    try {
+      const claimId = BigInt(req.params.claimId);
+      const c = await contract.claims(claimId);
+      const out = await resolveOnce({
+        claimId,
+        text: c.text,
+        specRaw: c.spec,
+        signer: wallet,
+        contract,
+        reResolve: true,
+      });
+      res.json({
+        claimId: claimId.toString(),
+        outcome: out.decision.outcome,
+        proofUri: out.proofUri,
+        txHash: out.txHash,
+      });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   app.get("/v1/claims/:claimId", async (req, res) => {
     if (!contract) return res.status(400).json({ error: "Not configured for on-chain reads." });
     try {
@@ -600,6 +636,9 @@ async function main() {
         spec: c.spec,
         proofUri: c.proofUri,
         consumer: c.consumer,
+        disputer: c.disputer,
+        disputeBondLocked: c.disputeBondLocked.toString(),
+        disputedAt: c.disputedAt.toString(),
       });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
@@ -628,6 +667,8 @@ async function main() {
               outcome: OUTCOME_NAMES[Number(c.outcome)],
               proofUri: c.proofUri,
               consumer: c.consumer,
+              disputer: c.disputer,
+              disputedAt: c.disputedAt.toString(),
               text: c.text,
               spec: c.spec,
             };
@@ -691,6 +732,30 @@ async function main() {
 
     contract.on("ConsumerNotified", (claimId: bigint, consumer: string, ok: boolean, _ret: string) => {
       console.log(`event ConsumerNotified #${claimId} -> ${consumer} ok=${ok}`);
+    });
+
+    // Auto-handle disputes: re-run the swarm with stricter thresholds and submit reResolve.
+    contract.on("ClaimDisputed", async (claimId: bigint, disputer: string, bond: bigint) => {
+      console.log(`event ClaimDisputed #${claimId} by ${disputer} bond=${bond}`);
+      if (!AUTO_RESOLVE) return;
+      try {
+        const c = await contract.claims(claimId);
+        const out = await resolveOnce({
+          claimId,
+          text: c.text,
+          specRaw: c.spec,
+          signer: wallet,
+          contract,
+          reResolve: true,
+        });
+        console.log(`auto-reresolved #${claimId} -> ${out.decision.outcome} tx=${out.txHash}`);
+      } catch (e) {
+        console.warn(`auto-reresolve #${claimId} failed: ${(e as Error).message}`);
+      }
+    });
+
+    contract.on("ClaimReResolved", (claimId: bigint, outcome: bigint, _proofUri: string, flipped: boolean, refunded: bigint) => {
+      console.log(`event ClaimReResolved #${claimId} -> ${OUTCOME_NAMES[Number(outcome)]} flipped=${flipped} refunded=${refunded}`);
     });
   }
 }

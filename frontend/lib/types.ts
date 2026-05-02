@@ -36,6 +36,12 @@ export type Claim = {
   outcome: "NO" | "YES" | "INVALID" | "ESCALATE";
   proofUri: string;
   consumer: string;
+  /** Address that opened a dispute, or zero. */
+  disputer?: string;
+  /** Block timestamp of the most recent dispute (string seconds), or "0". */
+  disputedAt?: string;
+  /** Wei locked as dispute bond (only on /v1/claims/:id detail). */
+  disputeBondLocked?: string;
   text: string;
   spec: string;
 };

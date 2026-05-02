@@ -14,12 +14,15 @@ function fmtTs(secs: string): string {
   return new Date(n * 1000).toLocaleString();
 }
 
+const ZERO = "0x0000000000000000000000000000000000000000";
+
 export function ClaimsTable({ claims }: { claims: Claim[] }) {
   if (!claims.length) return <div className="text-sm text-mute">No claims yet.</div>;
   return (
     <div className="space-y-3">
       {claims.map((c) => {
         const resolved = c.resolvedAt && c.resolvedAt !== "0";
+        const disputed = !!c.disputer && c.disputer !== ZERO && c.disputedAt && c.disputedAt !== "0";
         return (
           <div key={c.claimId} className="rounded-xl border border-line bg-slab/40 px-4 py-3 hairline">
             <div className="flex items-start gap-3">
@@ -28,12 +31,17 @@ export function ClaimsTable({ claims }: { claims: Claim[] }) {
                 <div className="font-medium text-zinc-100 line-clamp-2">{c.text || "(no text)"}</div>
                 <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-mute">
                   <span>by <Mono>{short(c.requester)}</Mono></span>
-                  {c.consumer && c.consumer !== "0x0000000000000000000000000000000000000000" ? (
+                  {c.consumer && c.consumer !== ZERO ? (
                     <span>consumer <Mono>{short(c.consumer)}</Mono></span>
                   ) : null}
                   <span>resolveBy {fmtTs(c.resolveBy)}</span>
                   {resolved ? <span>resolved {fmtTs(c.resolvedAt)}</span> : null}
                 </div>
+                {disputed ? (
+                  <div className="mt-1 text-[11px] text-warn">
+                    disputed by <Mono>{short(c.disputer!)}</Mono> at {fmtTs(c.disputedAt!)} — re-resolution pending.
+                  </div>
+                ) : null}
                 {c.proofUri ? (
                   <div className="mt-2 text-[11px] font-mono text-mute break-all">proof: {c.proofUri}</div>
                 ) : null}
@@ -41,10 +49,10 @@ export function ClaimsTable({ claims }: { claims: Claim[] }) {
               <span
                 className={
                   "shrink-0 rounded-md px-2 py-1 text-[11px] uppercase tracking-wider border " +
-                  OUTCOME_STYLES[c.outcome]
+                  (disputed ? "border-warn/40 text-warn bg-warn/5" : OUTCOME_STYLES[c.outcome])
                 }
               >
-                {resolved ? c.outcome : "Pending"}
+                {disputed ? "Disputed" : resolved ? c.outcome : "Pending"}
               </span>
             </div>
           </div>

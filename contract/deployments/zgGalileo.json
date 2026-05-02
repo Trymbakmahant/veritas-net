@@ -4,9 +4,9 @@
   "deployer": "0x554C9c829eD5f3a56F3374FC99eE3dE2d627DE32",
   "resolver": "0x554C9c829eD5f3a56F3374FC99eE3dE2d627DE32",
   "contracts": {
-    "OracleINFT": "0x3470401D253BF4Ab93d7a3Fdcc9052d6470C31E9",
-    "VeritasOracle": "0x87491422A7DB6561D7Ed2dF7eeCaC0373C961A10",
-    "RoyaltyRouter": "0x7e32c34c105faC15526AA682Ef5db1a186eb4621"
+    "OracleINFT": "0x0C19B6ce5847eA4B2f7383106A0cE43e86FEdcAd",
+    "VeritasOracle": "0xc0049C48ea008c3361313e830b3A1b74DDf2942a",
+    "RoyaltyRouter": "0xe3f4AE2Fc0e526716beBD826035D0f09A2489A4F"
   },
   "oracles": [
     {
@@ -25,5 +25,5 @@
       "bundleUri": "0g://placeholder/adversarial-auditor-v1"
     }
   ],
-  "deployedAtIso": "2026-05-02T07:56:19.904Z"
+  "deployedAtIso": "2026-05-02T10:34:18.302Z"
 }

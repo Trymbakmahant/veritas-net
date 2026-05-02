@@ -7,13 +7,43 @@
  *                Does NOT require ZG_STREAM_ID.
  *  - REAL (KV):   additionally ZG_KV_NODE_URL + ZG_FLOW_CONTRACT + ZG_STREAM_ID —
  *                live KV + logs on-chain streams (needs write permission for that stream id).
- *  - MOCK:       nothing set → in-memory KV + logs + mock-0g:// proof URIs.
+ *  - MOCK:       nothing set → in-memory KV + logs + mock-0g:// proof URIs. Mock pins are
+ *                also written under `backend/.veritas-zg-mock/` so the coordinator process
+ *                can resolve manifests registered by CLI/scripts in mock mode (override
+ *                directory with ZG_MOCK_PINS_ROOT).
  *
  * The same surface area (`putKv`, `getKv`, `appendLog`, `getLog`, `pinJson`)
  * is used everywhere in the backend so callers don't care which mode is on.
  */
 
 import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** Backend package dir (always `backend/`, regardless of process cwd when using tsx from repo root). */
+const ZG_BACKEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function mockPinsRoot(): string {
+  const raw = (process.env.ZG_MOCK_PINS_ROOT ?? "").trim();
+  if (raw) return path.isAbsolute(raw) ? raw : path.resolve(ZG_BACKEND_ROOT, raw);
+  return path.join(ZG_BACKEND_ROOT, ".veritas-zg-mock");
+}
+
+async function writeMockPinnedFile(jsonUtf8: string, hashHex: string) {
+  const dir = mockPinsRoot();
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, `${hashHex}.json`), jsonUtf8, "utf-8");
+}
+
+async function readMockPinnedFile<T>(hashHex: string): Promise<T | null> {
+  try {
+    const txt = await fs.readFile(path.join(mockPinsRoot(), `${hashHex}.json`), "utf-8");
+    return JSON.parse(txt) as T;
+  } catch {
+    return null;
+  }
+}
 
 export type ZgMode = "real" | "mock";
 
@@ -68,11 +98,15 @@ class MockZgBackend {
     const json = JSON.stringify(payload);
     const hash = sha256Hex(json);
     this.pins.set(hash, payload);
+    await writeMockPinnedFile(json, hash);
     return `mock-0g://${hash}`;
   }
   async fetchPinned<T = unknown>(uri: string): Promise<T | null> {
-    const hash = uri.replace(/^mock-0g:\/\//, "");
-    return (this.pins.get(hash) as T) ?? null;
+    if (!uri.startsWith("mock-0g://")) return null;
+    const hash = uri.slice("mock-0g://".length);
+    const mem = this.pins.get(hash);
+    if (mem != null) return mem as T;
+    return readMockPinnedFile<T>(hash);
   }
 }
 
@@ -173,7 +207,10 @@ class HybridZgBackend {
 
   async fetchPinned<T = unknown>(uri: string): Promise<T | null> {
     if (!uri) return null;
-    if (uri.startsWith("mock-0g://")) return null; // mock backend pins are local
+    if (uri.startsWith("mock-0g://")) {
+      const hash = uri.slice("mock-0g://".length);
+      return readMockPinnedFile<T>(hash);
+    }
     if (uri.startsWith("http://") || uri.startsWith("https://")) {
       try {
         const res = await fetch(uri);

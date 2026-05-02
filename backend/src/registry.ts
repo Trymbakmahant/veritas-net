@@ -140,8 +140,13 @@ export class AgentRegistry {
   }
 
   private async resolveManifest(ens: string, bundleUri: string): Promise<AgentManifest | null> {
-    // 1) fetchable manifest (0g:// or https://)
-    if (bundleUri && (bundleUri.startsWith("0g://") || bundleUri.startsWith("http"))) {
+    // 1) fetchable manifest (0g://, https://, or mock-0g:// persisted under backend/.veritas-zg-mock)
+    if (
+      bundleUri
+      && (bundleUri.startsWith("0g://")
+        || bundleUri.startsWith("http")
+        || bundleUri.startsWith("mock-0g://"))
+    ) {
       try {
         const raw = await fetchPinned<unknown>(bundleUri);
         if (raw) {

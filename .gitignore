@@ -23,6 +23,9 @@ coverage.json
 # Local-only launch guide (fill with your keys; do not commit)
 READY_TO_LAUNCH.md
 
+# Local mock 0G pins (manifest JSON blobs — dev only)
+.veritas-zg-mock/
+
 # Logs & debug
 logs/
 *.log

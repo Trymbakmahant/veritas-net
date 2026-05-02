@@ -2,8 +2,10 @@
  * Gensyn AXL transport — encrypted P2P channels.
  *
  * Two modes:
- *  - REAL : when AXL_HTTP_URL is set, forwards every publish/subscribe to the
- *           AXL sidecar running locally (HTTP at AXL_HTTP_URL).
+ *  - REAL : when AXL_HTTP_URL is set, forwards every publish/subscribe to an
+ *           AXL HTTP sidecar. The wrapper supports both SSE (`data: {...}`) and
+ *           NDJSON (`{...}\n`) subscribe streams so it can work with a local
+ *           dev sidecar or a real mesh adapter.
  *  - MOCK : otherwise, behaves as an in-process pub/sub bus so the entire
  *           swarm can run end-to-end in a single Node process (great for the
  *           hackathon demo without operating a real mesh).
@@ -23,12 +25,89 @@
 
 export type AxlMode = "real" | "mock";
 
-const AXL_HTTP_URL = process.env.AXL_HTTP_URL || "";
-const AXL_PEER_ID  = process.env.AXL_PEER_ID  || "local-coordinator";
+const AXL_HTTP_URL = (process.env.AXL_HTTP_URL || "").trim();
+const AXL_PEER_ID  = (process.env.AXL_PEER_ID  || "local-coordinator").trim();
+const AXL_API_KEY  = (process.env.AXL_API_KEY  || "").trim();
+const AXL_SEND_PATH = (process.env.AXL_SEND_PATH || "/axl/send").trim();
+const AXL_SUBSCRIBE_PATH = (process.env.AXL_SUBSCRIBE_PATH || "/axl/subscribe").trim();
+const AXL_HEALTH_PATH = (process.env.AXL_HEALTH_PATH || "/health").trim();
+const AXL_RECONNECT_MS = Number(process.env.AXL_RECONNECT_MS ?? "1500");
+const AXL_PUBLISH_TIMEOUT_MS = Number(process.env.AXL_PUBLISH_TIMEOUT_MS ?? "8000");
 
 export const axlMode: AxlMode = AXL_HTTP_URL ? "real" : "mock";
 
 type Handler = (payload: any, meta: { channel: string; from?: string }) => void | Promise<void>;
+type AxlHealth = {
+  ok: boolean;
+  mode: AxlMode;
+  peerId: string;
+  sidecarUrl?: string;
+  sidecar?: unknown;
+  error?: string;
+};
+
+function joinUrl(base: string, path: string) {
+  return `${base.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+}
+
+function headers(extra?: Record<string, string>): Record<string, string> {
+  return {
+    ...(extra ?? {}),
+    ...(AXL_API_KEY ? { authorization: `Bearer ${AXL_API_KEY}` } : {}),
+    "x-veritas-peer-id": AXL_PEER_ID,
+  };
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseMaybeJson(raw: string): any | null {
+  const s = raw.trim();
+  if (!s) return null;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parses either:
+ *   - SSE frames: `event: message\ndata: {...}\n\n`
+ *   - NDJSON lines: `{...}\n`
+ *
+ * Returns parsed messages and unconsumed buffer tail.
+ */
+function parseStreamBuffer(input: string): { messages: any[]; rest: string } {
+  const messages: any[] = [];
+  let rest = input;
+
+  // SSE: complete frames are separated by a blank line.
+  while (rest.includes("\n\n") || rest.includes("\r\n\r\n")) {
+    const sep = rest.includes("\r\n\r\n") ? "\r\n\r\n" : "\n\n";
+    const idx = rest.indexOf(sep);
+    const frame = rest.slice(0, idx);
+    rest = rest.slice(idx + sep.length);
+    const data = frame
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("\n");
+    const msg = parseMaybeJson(data || frame);
+    if (msg) messages.push(msg);
+  }
+
+  // NDJSON: complete lines are parseable JSON objects.
+  const lines = rest.split(/\r?\n/);
+  rest = lines.pop() ?? "";
+  for (const line of lines) {
+    const msg = parseMaybeJson(line);
+    if (msg) messages.push(msg);
+  }
+
+  return { messages, rest };
+}
 
 // ---------- mock backend ----------------------------------------------------
 
@@ -57,11 +136,19 @@ class RealAxl {
   private streams = new Map<string, AbortController>();
 
   async publish(channel: string, payload: any) {
-    const res = await fetch(`${AXL_HTTP_URL.replace(/\/$/, "")}/axl/send`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ channel, payload }),
-    });
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), AXL_PUBLISH_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(joinUrl(AXL_HTTP_URL, AXL_SEND_PATH), {
+        method: "POST",
+        headers: headers({ "content-type": "application/json" }),
+        body: JSON.stringify({ channel, payload, from: AXL_PEER_ID, ts: new Date().toISOString() }),
+        signal: ac.signal,
+      });
+    } finally {
+      clearTimeout(t);
+    }
     if (!res.ok) {
       throw new Error(`AXL publish failed ${res.status}: ${await res.text().catch(() => "")}`);
     }
@@ -69,41 +156,79 @@ class RealAxl {
 
   subscribe(channel: string, handler: Handler) {
     const ac = new AbortController();
-    const url = `${AXL_HTTP_URL.replace(/\/$/, "")}/axl/subscribe`;
+    const url = joinUrl(AXL_HTTP_URL, AXL_SUBSCRIBE_PATH);
+    const id = `${channel}:${Math.random().toString(16).slice(2)}`;
     void (async () => {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json", accept: "text/event-stream" },
-          body: JSON.stringify({ channel }),
-          signal: ac.signal,
-        });
-        if (!res.ok || !res.body) return;
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        while (!ac.signal.aborted) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const msg = JSON.parse(line);
-              await handler(msg.payload ?? msg, { channel, from: msg.from });
-            } catch {
-              // ignore malformed line
+      let attempt = 0;
+      while (!ac.signal.aborted) {
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: headers({ "content-type": "application/json", accept: "text/event-stream, application/x-ndjson" }),
+            body: JSON.stringify({ channel, peerId: AXL_PEER_ID }),
+            signal: ac.signal,
+          });
+          if (!res.ok || !res.body) {
+            throw new Error(`AXL subscribe failed ${res.status}`);
+          }
+          attempt = 0;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          while (!ac.signal.aborted) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const parsed = parseStreamBuffer(buf);
+            buf = parsed.rest;
+            for (const msg of parsed.messages) {
+              await handler(msg.payload ?? msg, {
+                channel: msg.channel ?? channel,
+                from: msg.from,
+              });
             }
           }
+        } catch (e) {
+          if (ac.signal.aborted) break;
+          attempt += 1;
+          const wait = Math.min(30_000, AXL_RECONNECT_MS * Math.max(1, attempt));
+          console.warn(`AXL subscribe ${channel} disconnected: ${(e as Error).message}; reconnecting in ${wait}ms`);
+          await sleep(wait);
         }
-      } catch {
-        // network/connection ended; subscribe is best-effort.
       }
     })();
-    this.streams.set(channel + ":" + Math.random(), ac);
-    return () => ac.abort();
+    this.streams.set(id, ac);
+    return () => {
+      ac.abort();
+      this.streams.delete(id);
+    };
+  }
+
+  async health(): Promise<AxlHealth> {
+    try {
+      const res = await fetch(joinUrl(AXL_HTTP_URL, AXL_HEALTH_PATH), {
+        headers: headers(),
+        signal: AbortSignal.timeout(2000),
+      });
+      const text = await res.text().catch(() => "");
+      const sidecar = parseMaybeJson(text) ?? text;
+      return {
+        ok: res.ok,
+        mode: "real",
+        peerId: AXL_PEER_ID,
+        sidecarUrl: AXL_HTTP_URL,
+        sidecar,
+        ...(res.ok ? {} : { error: `HTTP ${res.status}` }),
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        mode: "real",
+        peerId: AXL_PEER_ID,
+        sidecarUrl: AXL_HTTP_URL,
+        error: (e as Error).message,
+      };
+    }
   }
 }
 
@@ -121,6 +246,11 @@ export const axl = {
 
   subscribe(channel: string, handler: Handler) {
     return impl.subscribe(channel, handler);
+  },
+
+  async health(): Promise<AxlHealth> {
+    if (impl instanceof RealAxl) return impl.health();
+    return { ok: true, mode: "mock", peerId: AXL_PEER_ID };
   },
 
   /**
@@ -142,7 +272,12 @@ export const axl = {
         off();
         resolve(resp as T);
       });
-      void impl.publish(channel, payload);
+      void impl.publish(channel, payload).catch(() => {
+        if (settled) return;
+        settled = true;
+        off();
+        resolve(null);
+      });
       setTimeout(() => {
         if (settled) return;
         settled = true;

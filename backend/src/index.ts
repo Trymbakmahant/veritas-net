@@ -55,12 +55,17 @@ const AUTO_RESOLVE = (process.env.AUTO_RESOLVE ?? "true") !== "false";
 
 const ABI = [
   "event ClaimSubmitted(uint256 indexed claimId, address indexed requester, uint64 resolveBy, string text, string spec)",
+  "event ConsumerRegistered(uint256 indexed claimId, address indexed consumer)",
   "event ClaimResolved(uint256 indexed claimId, uint8 outcome, uint64 resolvedAt, string proofUri, uint256[] participants)",
+  "event ConsumerNotified(uint256 indexed claimId, address indexed consumer, bool ok, bytes returnData)",
   "function resolveClaim(uint256 claimId, uint8 outcome, string proofUri, uint256[] participants, bool[] agreed) external",
-  "function claims(uint256) view returns (address requester,uint64 resolveBy,uint64 resolvedAt,uint8 outcome,string text,string spec,string proofUri)",
+  "function claims(uint256) view returns (address requester,uint64 resolveBy,uint64 resolvedAt,uint8 outcome,string text,string spec,string proofUri,address consumer)",
   "function nextClaimId() view returns (uint256)",
   "function submitClaim(string text, string spec, uint64 resolveBy) external returns (uint256)",
+  "function submitClaimWithConsumer(string text, string spec, uint64 resolveBy, address consumer) external returns (uint256)",
 ];
+
+const OUTCOME_NAMES = ["NO", "YES", "INVALID", "ESCALATE"] as const;
 
 function requireEnv(name: string, value: string) {
   if (!value) throw new Error(`Missing env ${name}`);
@@ -518,11 +523,48 @@ async function main() {
         requester: c.requester,
         resolveBy: c.resolveBy.toString(),
         resolvedAt: c.resolvedAt.toString(),
-        outcome: ["NO", "YES", "INVALID", "ESCALATE"][Number(c.outcome)],
+        outcome: OUTCOME_NAMES[Number(c.outcome)],
         text: c.text,
         spec: c.spec,
         proofUri: c.proofUri,
+        consumer: c.consumer,
       });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get("/v1/claims", async (req, res) => {
+    if (!contract) return res.status(400).json({ error: "Not configured for on-chain reads." });
+    try {
+      const next: bigint = await contract.nextClaimId();
+      const limit = Math.max(1, Math.min(100, Number((req.query.limit as string) ?? "20")));
+      const total = next > 1n ? Number(next - 1n) : 0;
+      const start = Math.max(1, total - limit + 1);
+      const ids: bigint[] = [];
+      for (let i = BigInt(start); i < next; i++) ids.push(i);
+
+      const out = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const c = await contract.claims(id);
+            return {
+              claimId: id.toString(),
+              requester: c.requester,
+              resolveBy: c.resolveBy.toString(),
+              resolvedAt: c.resolvedAt.toString(),
+              outcome: OUTCOME_NAMES[Number(c.outcome)],
+              proofUri: c.proofUri,
+              consumer: c.consumer,
+              text: c.text,
+              spec: c.spec,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      res.json({ count: out.filter(Boolean).length, total, claims: out.filter(Boolean) });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }
@@ -568,7 +610,15 @@ async function main() {
     });
 
     contract.on("ClaimResolved", (claimId: bigint, outcome: bigint, _resolvedAt: bigint, proofUri: string) => {
-      console.log(`event ClaimResolved #${claimId} -> ${["NO","YES","INVALID","ESCALATE"][Number(outcome)]} ${proofUri}`);
+      console.log(`event ClaimResolved #${claimId} -> ${OUTCOME_NAMES[Number(outcome)]} ${proofUri}`);
+    });
+
+    contract.on("ConsumerRegistered", (claimId: bigint, consumer: string) => {
+      console.log(`event ConsumerRegistered #${claimId} -> ${consumer}`);
+    });
+
+    contract.on("ConsumerNotified", (claimId: bigint, consumer: string, ok: boolean, _ret: string) => {
+      console.log(`event ConsumerNotified #${claimId} -> ${consumer} ok=${ok}`);
     });
   }
 }

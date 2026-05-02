@@ -2,10 +2,12 @@
  * 0G Storage wrapper — KV (live state) + Log (history).
  *
  * Two modes:
- *  - REAL  : when ZG_RPC_URL + ZG_INDEXER_URL + ZG_KV_NODE_URL are set, uses
- *            @0glabs/0g-ts-sdk against the 0G testnet.
- *  - MOCK  : otherwise, uses an in-memory KV + log store and returns deterministic
- *            content URIs of the form `mock-0g://<sha256>`.
+ *  - REAL (blob): ZG_RPC_URL + ZG_INDEXER_URL + ZG_PRIVATE_KEY — proof bundles use
+ *                indexer.upload (same path as official 0G file storage; visible on Storage Scan).
+ *                Does NOT require ZG_STREAM_ID.
+ *  - REAL (KV):   additionally ZG_KV_NODE_URL + ZG_FLOW_CONTRACT + ZG_STREAM_ID —
+ *                live KV + logs on-chain streams (needs write permission for that stream id).
+ *  - MOCK:       nothing set → in-memory KV + logs + mock-0g:// proof URIs.
  *
  * The same surface area (`putKv`, `getKv`, `appendLog`, `getLog`, `pinJson`)
  * is used everywhere in the backend so callers don't care which mode is on.
@@ -15,17 +17,21 @@ import * as crypto from "node:crypto";
 
 export type ZgMode = "real" | "mock";
 
-const ZG_RPC_URL      = process.env.ZG_RPC_URL      || "";
-const ZG_INDEXER_URL  = process.env.ZG_INDEXER_URL  || "";
-const ZG_KV_NODE_URL  = process.env.ZG_KV_NODE_URL  || "";
-const ZG_FLOW_CONTRACT = process.env.ZG_FLOW_CONTRACT || "";
-const ZG_STREAM_ID    = process.env.ZG_STREAM_ID    || "";
-const ZG_PRIVATE_KEY  = process.env.ZG_PRIVATE_KEY  || process.env.COORDINATOR_PRIVATE_KEY || "";
+const ZG_RPC_URL      = (process.env.ZG_RPC_URL      ?? "").trim();
+const ZG_INDEXER_URL  = (process.env.ZG_INDEXER_URL  ?? "").trim();
+const ZG_KV_NODE_URL  = (process.env.ZG_KV_NODE_URL  ?? "").trim();
+const ZG_FLOW_CONTRACT = (process.env.ZG_FLOW_CONTRACT ?? "").trim();
+const ZG_STREAM_ID    = (process.env.ZG_STREAM_ID    ?? "").trim();
+const ZG_PRIVATE_KEY  = (process.env.ZG_PRIVATE_KEY ?? process.env.COORDINATOR_PRIVATE_KEY ?? "").trim();
 
-export const zgMode: ZgMode =
-  ZG_RPC_URL && ZG_INDEXER_URL && ZG_KV_NODE_URL && ZG_FLOW_CONTRACT && ZG_STREAM_ID && ZG_PRIVATE_KEY
-    ? "real"
-    : "mock";
+/** True when proofs can hit real 0G Storage via indexer.upload (turbo indexer URL). */
+const zgBlobReal = !!(ZG_RPC_URL && ZG_INDEXER_URL && ZG_PRIVATE_KEY);
+
+/** True when KV + appendLog use on-chain KV batches (requires stream write permission). */
+export const zgKvReal =
+  !!(zgBlobReal && ZG_KV_NODE_URL && ZG_FLOW_CONTRACT && ZG_STREAM_ID);
+
+export const zgMode: ZgMode = zgBlobReal ? "real" : "mock";
 
 // ---------- shared helpers --------------------------------------------------
 
@@ -70,9 +76,11 @@ class MockZgBackend {
   }
 }
 
-// ---------- real backend (lazy-loaded) --------------------------------------
+// ---------- real blob + optional KV (lazy-loaded) -----------------------------
 
-class RealZgBackend {
+class HybridZgBackend {
+  /** In-memory KV/logs when blob storage is live but KV stream is unavailable / not configured. */
+  private kvFallback = new MockZgBackend();
   private sdkPromise: Promise<any> | null = null;
   private indexer: any = null;
   private kvClient: any = null;
@@ -83,17 +91,18 @@ class RealZgBackend {
   private async sdk() {
     if (!this.sdkPromise) {
       this.sdkPromise = (async () => {
-        // Dynamic import so the package is optional at install time.
-        const sdk = await import("@0glabs/0g-ts-sdk").catch(() => null);
+        const sdk = await import("@0gfoundation/0g-ts-sdk").catch(() => null);
         const { ethers } = await import("ethers");
-        if (!sdk) throw new Error("ZG real mode requires @0glabs/0g-ts-sdk");
+        if (!sdk) throw new Error("ZG real mode requires @0gfoundation/0g-ts-sdk");
         const provider = new ethers.JsonRpcProvider(ZG_RPC_URL);
         this.wallet = new ethers.Wallet(ZG_PRIVATE_KEY, provider);
         this.indexer = new (sdk as any).Indexer(ZG_INDEXER_URL);
-        this.kvClient = new (sdk as any).KvClient(ZG_KV_NODE_URL);
-        this.flowContract = (sdk as any).getFlowContract
-          ? (sdk as any).getFlowContract(ZG_FLOW_CONTRACT, this.wallet)
-          : new ethers.Contract(ZG_FLOW_CONTRACT, [], this.wallet);
+        if (zgKvReal) {
+          this.kvClient = new (sdk as any).KvClient(ZG_KV_NODE_URL);
+          this.flowContract = (sdk as any).getFlowContract
+            ? (sdk as any).getFlowContract(ZG_FLOW_CONTRACT, this.wallet)
+            : new ethers.Contract(ZG_FLOW_CONTRACT, [], this.wallet);
+        }
         return sdk;
       })();
     }
@@ -108,6 +117,7 @@ class RealZgBackend {
   }
 
   async putKv(key: string, value: unknown) {
+    if (!zgKvReal) return this.kvFallback.putKv(key, value);
     const batcher = await this.batcher();
     const k = Buffer.from(key, "utf-8");
     const v = Buffer.from(JSON.stringify(value), "utf-8");
@@ -115,7 +125,9 @@ class RealZgBackend {
     const [, err] = await batcher.exec();
     if (err) throw new Error(`0G KV put failed: ${err}`);
   }
+
   async getKv<T = unknown>(key: string): Promise<T | null> {
+    if (!zgKvReal) return this.kvFallback.getKv<T>(key);
     const { ethers } = await import("ethers");
     const k = Buffer.from(key, "utf-8");
     const raw = await this.kvClient.getValue(this.streamId, ethers.encodeBase64(k));
@@ -126,38 +138,47 @@ class RealZgBackend {
       return raw as T;
     }
   }
+
   async appendLog(stream: string, entry: unknown) {
-    // Logs are encoded as KV writes under `${stream}:${ts}`.
+    if (!zgKvReal) return this.kvFallback.appendLog(stream, entry);
     const ts = Date.now();
     await this.putKv(`${stream}:${ts}`, { ts: nowIso(), ...((entry ?? {}) as object) });
   }
-  async getLog<T = unknown>(_stream: string): Promise<T[]> {
-    // Range scan support is provider-specific; for the hackathon callers should
-    // also keep a local cache. Return [] in real mode if unsupported.
+
+  async getLog<T = unknown>(stream: string, range?: { from?: number; to?: number }): Promise<T[]> {
+    if (!zgKvReal) return this.kvFallback.getLog<T>(stream, range);
+    void range;
     return [];
   }
+
   async pinJson(payload: unknown): Promise<string> {
     const sdk: any = await this.sdk();
-    const { ethers } = await import("ethers");
     const json = JSON.stringify(payload);
-    const blob = new (sdk as any).Blob(Buffer.from(json, "utf-8"));
-    const [tree, treeErr] = await blob.merkleTree();
+    const buf = Buffer.from(json, "utf-8");
+    const file =
+      sdk.MemData != null ? new sdk.MemData(buf) : new sdk.Blob(buf);
+    const [tree, treeErr] = await file.merkleTree();
     if (treeErr) throw new Error(`0G blob merkleTree: ${treeErr}`);
-    const [tx, uploadErr] = await this.indexer.upload(blob, ZG_RPC_URL, this.wallet);
+    const [tx, uploadErr] = await this.indexer.upload(file, ZG_RPC_URL, this.wallet);
     if (uploadErr) throw new Error(`0G upload: ${uploadErr}`);
-    void ethers; // keep import
     void tx;
+    try {
+      await file.close?.();
+    } catch {
+      /* optional */
+    }
     const root = tree.rootHash();
     return `0g://${root}`;
   }
+
   async fetchPinned<T = unknown>(_uri: string): Promise<T | null> {
-    return null; // download requires the indexer; coordinator already has the bundle in memory.
+    return null;
   }
 }
 
 // ---------- public surface --------------------------------------------------
 
-const backend = zgMode === "real" ? new RealZgBackend() : new MockZgBackend();
+const backend = zgBlobReal ? new HybridZgBackend() : new MockZgBackend();
 
 export async function putKv(key: string, value: unknown) {
   return backend.putKv(key, value);

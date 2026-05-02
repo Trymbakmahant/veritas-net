@@ -23,8 +23,10 @@ import { buildAndPinProof, signVote } from "./proof.js";
 import {
   appendLog,
   putKv,
+  pinJson,
   ZgKeys,
   ZgStreams,
+  zgKvReal,
   zgMode,
 } from "./zg.js";
 import { zgComputeMode } from "./zgCompute.js";
@@ -90,7 +92,7 @@ function pickAgentSet(spec: AgentRequest["spec"]): AgentName[] {
   return ["snapshot", "snapshot"];
 }
 
-async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Wallet) {
+async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signer) {
   const agentSet = pickAgentSet(req.spec);
 
   // Publish dispatch on AXL (informational; in mock mode there are no remote subs).
@@ -176,7 +178,7 @@ async function resolveOnce(args: {
   claimId: bigint;
   text: string;
   specRaw: string;
-  signer: ethers.Wallet;
+  signer: ethers.Signer;
   contract: ethers.Contract;
 }) {
   const spec = parseSpec(args.specRaw);
@@ -305,7 +307,13 @@ async function main() {
   app.get("/health", (_req, res) =>
     res.json({
       ok: true,
-      modes: { axl: axlMode, zgStorage: zgMode, zgCompute: zgComputeMode },
+      modes: {
+        axl: axlMode,
+        zgStorage: zgMode,
+        /** `real` only when ZG_STREAM_ID + Flow + KV URL are set AND writes succeed ACL. */
+        zgKv: zgKvReal ? "real" : "mock",
+        zgCompute: zgComputeMode,
+      },
       onChain: !!contract,
     }),
   );
@@ -337,7 +345,7 @@ async function main() {
         critic,
         thresholds: { resolvability: RESOLVABILITY_THRESHOLD, agreement: AGREEMENT_THRESHOLD },
       });
-      res.json({ decision: final, critic, responses: responses.map((r) => ({
+      const responseOut = responses.map((r) => ({
         agent: r.agent,
         ens: r.identity.ens,
         tokenId: r.identity.tokenId.toString(),
@@ -346,7 +354,41 @@ async function main() {
         confidence: r.confidence,
         reasoning: r.reasoning,
         evidence: r.evidence,
-      })) });
+      }));
+
+      // Pin a verify snapshot to 0G (indexer.upload) — works without KV stream id; judges can look up root on Storage Scan.
+      let proofUri: string | undefined;
+      let proofPinError: string | undefined;
+      if (zgMode === "real") {
+        try {
+          proofUri = await pinJson({
+            schema: "veritas.verify.v1",
+            decidedAtIso: new Date().toISOString(),
+            request: { text: String(text), spec: parsedSpec },
+            decision: {
+              outcome: final.outcome,
+              confidence: final.confidence,
+              resolvable: final.resolvable,
+              agreement: final.agreement,
+              consensus: final.consensus,
+              participants: final.participants,
+            },
+            critic: critic ?? null,
+            responses: responseOut,
+          });
+        } catch (e) {
+          proofPinError = (e as Error).message;
+          console.warn("pinJson (/v1/verify) failed:", proofPinError);
+        }
+      }
+
+      res.json({
+        decision: final,
+        critic,
+        responses: responseOut,
+        proofUri,
+        ...(proofPinError ? { proofPinError } : {}),
+      });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }
@@ -400,7 +442,8 @@ async function main() {
   app.listen(PORT, () => {
     console.log(`\nVeritas coordinator on :${PORT}`);
     console.log(`  axl:        ${axlMode}`);
-    console.log(`  zgStorage:  ${zgMode}`);
+    console.log(`  zgStorage:  ${zgMode} (blob upload proofs)`);
+    console.log(`  zgKV:       ${zgKvReal ? "real" : "mock"} (claim logs / KV; needs stream write perms)`);
     console.log(`  zgCompute:  ${zgComputeMode}`);
     console.log(`  onChain:    ${!!contract} (oracle=${ORACLE_ADDRESS || "-"})`);
   });

@@ -158,7 +158,9 @@ export const axl = {
   async collect<T = any>(channel: string, windowMs: number): Promise<T[]> {
     return new Promise<T[]>((resolve) => {
       const out: T[] = [];
-      const off = impl.subscribe(channel, (m) => out.push(m as T));
+      const off = impl.subscribe(channel, (m) => {
+        out.push(m as T);
+      });
       setTimeout(() => {
         off();
         resolve(out);

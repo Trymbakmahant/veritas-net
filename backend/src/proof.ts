@@ -38,7 +38,7 @@ export function voteHash(input: {
  * Sign a vote with the iNFT owner key (or coordinator key in mock mode).
  */
 export async function signVote(args: {
-  signer: ethers.Wallet;
+  signer: ethers.Signer;
   tokenId: bigint;
   claimId: bigint;
   outcome: Outcome;
@@ -58,6 +58,7 @@ export async function signVote(args: {
     reasoning: args.reasoning,
   });
   const sig = (await args.signer.signMessage(ethers.getBytes(hash))) as `0x${string}`;
+  const addr = await args.signer.getAddress();
   return {
     tokenId: args.tokenId,
     claimId: args.claimId,
@@ -68,7 +69,7 @@ export async function signVote(args: {
     evidence: args.evidence,
     zgReceipt: args.zgReceipt,
     sig,
-    signer: args.signer.address as `0x${string}`,
+    signer: addr as `0x${string}`,
     voteHash: hash,
   };
 }

@@ -17,8 +17,10 @@
     "dev:snapshot":    "npm --workspace veritas-snapshot-agent run dev",
     "dev:auditor":     "npm --workspace veritas-adversarial-auditor-agent run dev",
     "dev:backend":     "npm --workspace veritas-backend run dev",
+    "dev:frontend":    "npm --workspace veritas-frontend run dev",
     "dev:agents":      "concurrently -n github,snapshot,auditor -c blue,green,magenta \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\"",
-    "dev:all":         "concurrently -n github,snapshot,auditor,backend -c blue,green,magenta,yellow \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\" \"npm:dev:backend\""
+    "dev:all":         "concurrently -n github,snapshot,auditor,backend -c blue,green,magenta,yellow \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\" \"npm:dev:backend\"",
+    "dev:full":        "concurrently -n github,snapshot,auditor,backend,frontend -c blue,green,magenta,yellow,cyan \"npm:dev:github\" \"npm:dev:snapshot\" \"npm:dev:auditor\" \"npm:dev:backend\" \"npm:dev:frontend\""
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

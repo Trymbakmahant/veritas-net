@@ -8,7 +8,9 @@
     "deploy:zg": "hardhat run scripts/deploy.ts --network zgGalileo",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
     "deploy:baseSepolia": "hardhat run scripts/deploy.ts --network baseSepolia",
-    "deploy:local": "hardhat run scripts/deploy.ts --network hardhat"
+    "deploy:local": "hardhat run scripts/deploy.ts --network hardhat",
+    "deploy:market:zg": "hardhat run scripts/deploy-example-market.ts --network zgGalileo",
+    "deploy:market:local": "hardhat run scripts/deploy-example-market.ts --network hardhat"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",

@@ -305,6 +305,26 @@ This gives local multi-process pub/sub today and matches the adapter boundary fo
 a hosted Gensyn AXL sidecar later. Check `GET /health` on the coordinator; the
 `axl` field includes sidecar status.
 
+Primary oracle flow in real AXL mode:
+
+```text
+Coordinator
+  ├─ subscribes veritas/vote/<claimId>
+  ├─ publishes  veritas/claim/dispatch
+  ▼
+GitHub / Snapshot agents
+  ├─ subscribe veritas/claim/dispatch
+  ├─ filter by capability
+  ├─ run local verifier
+  └─ publish { kind: "agent_response", response } to veritas/vote/<claimId>
+  ▼
+Coordinator
+  ├─ collects responses for AXL_VOTE_WINDOW_MS
+  ├─ maps them back to iNFT identities
+  ├─ signs + republishes { kind: "signed_vote", ... }
+  └─ falls back to HTTP /verify if no AXL responses arrive
+```
+
 ### 4. Start dashboard only
 
 ```bash

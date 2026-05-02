@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:axl": "tsx watch scripts/axl-sidecar.ts",
+    "axl": "tsx scripts/axl-sidecar.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },

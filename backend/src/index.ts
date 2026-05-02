@@ -405,7 +405,7 @@ async function main() {
     next();
   });
 
-  app.get("/health", (_req, res) =>
+  app.get("/health", async (_req, res) =>
     res.json({
       ok: true,
       modes: {
@@ -415,6 +415,7 @@ async function main() {
         zgKv: zgKvReal ? "real" : "mock",
         zgCompute: zgComputeMode,
       },
+      axl: await axl.health(),
       onChain: !!contract,
       registeredAgents: registry.list().length,
     }),

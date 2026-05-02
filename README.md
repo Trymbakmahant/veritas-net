@@ -278,20 +278,37 @@ cd veritas-net
 ### 2. Start oracle services
 
 ```bash
-cd agents/github-agent && npm run dev
-cd agents/snapshot-agent && npm run dev
+npm install --legacy-peer-deps
+npm run dev:full
 ```
 
-### 3. Start coordinator backend
+`dev:full` starts:
+
+- local AXL HTTP sidecar on `http://localhost:8765`
+- GitHub / Snapshot / Auditor agents
+- coordinator backend on `http://localhost:8787` with `AXL_HTTP_URL=http://localhost:8765`
+- Next.js dashboard on `http://localhost:3000`
+
+### 3. AXL real mode
 
 ```bash
-cd backend && npm run dev
+# terminal 1
+npm run dev:axl
+
+# terminal 2
+AXL_HTTP_URL=http://localhost:8765 npm run dev:backend
 ```
 
-### 4. Start dashboard
+When `AXL_HTTP_URL` is set, the coordinator switches from in-process mock pub/sub
+to the HTTP sidecar (`POST /axl/send`, `POST/GET /axl/subscribe`, `GET /health`).
+This gives local multi-process pub/sub today and matches the adapter boundary for
+a hosted Gensyn AXL sidecar later. Check `GET /health` on the coordinator; the
+`axl` field includes sidecar status.
+
+### 4. Start dashboard only
 
 ```bash
-cd frontend && npm install && npm run dev
+npm run dev:frontend
 ```
 
 ---

@@ -18,7 +18,8 @@
  *   npx tsx scripts/register-agent.ts --manifest ./examples/my-agent.manifest.json
  */
 
-import "dotenv/config";
+import * as dotenv from "dotenv";
+dotenv.config({ override: true }); // .env wins over stale shell-exported vars
 import { ethers } from "ethers";
 import * as fs from "node:fs/promises";
 import { AgentManifestSchema } from "../src/types.js";

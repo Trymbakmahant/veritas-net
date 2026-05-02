@@ -12,9 +12,14 @@
  * Usage (coordinator must be running locally on $BACKEND_URL):
  *   cd backend
  *   BACKEND_URL=http://localhost:8787 npx tsx scripts/registry-smoke.ts
+ *
+ * If you pasted `cd backendBACKEND_URL=...` without a newline, shell runs a bogus
+ * `cd` and skips setting BACKEND_URL; run the two separately or put `;` between them.
  */
 
-import "dotenv/config";
+import * as dotenv from "dotenv";
+dotenv.config({ override: true }); // .env wins over stale shell-exported vars
+
 import express from "express";
 import { ethers } from "ethers";
 import { AgentManifestSchema } from "../src/types.js";
@@ -26,6 +31,36 @@ const ABI = [
   "function registrationFee() view returns (uint256)",
   "event Registered(uint256 indexed tokenId,address indexed owner,string ens,string manifestUri,bytes32 manifestHash)",
 ];
+
+async function fetchJson(method: string, url: string, body?: unknown) {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    const c = e as NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException };
+    const errno = c?.cause?.code ?? c?.code ?? "";
+    const hint =
+      errno === "ECONNREFUSED" || (e as Error).message.includes("fetch failed")
+        ? " Is the coordinator running? Try: cd backend && npm run dev (or npm run dev:all from repo root)."
+        : "";
+    throw new Error(`${method} ${url} failed${errno ? ` [${errno}]` : ""}: ${(e as Error).message}.${hint}`, { cause: e });
+  }
+  const text = await res.text().catch(() => "");
+  let json: unknown;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`${method} ${url} returned non-JSON (HTTP ${res.status}): ${text.slice(0, 240)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`${method} ${url} HTTP ${res.status}: ${text.slice(0, 480)}`);
+  }
+  return json;
+}
 
 async function main() {
   const BACKEND = (process.env.BACKEND_URL ?? "http://localhost:8787").replace(/\/$/, "");
@@ -97,21 +132,44 @@ async function main() {
     }
     console.log(`  registered tokenId=${tokenId?.toString()}`);
 
+    console.log(`probing coordinator at ${BACKEND} ...`);
+    try {
+      await fetchJson("GET", `${BACKEND}/health`);
+    } catch (e) {
+      throw new Error(`${(e as Error).message} Start coordinator with ORACLE_INFT_ADDRESS matching backend/.env, then rerun.`);
+    }
+
     // ---- 3. tell coordinator to refresh, then list ----
-    await fetch(`${BACKEND}/v1/agents/refresh`, { method: "POST" });
-    const list = await (await fetch(`${BACKEND}/v1/agents`)).json();
-    const matched = list.agents.find((a: any) => a.ens === ens);
+    await fetchJson("POST", `${BACKEND}/v1/agents/refresh`);
+    const list = (await fetchJson("GET", `${BACKEND}/v1/agents`)) as {
+      agents: Array<{ ens: string; tokenId: string }>;
+      count: number;
+    };
+    const matched = (list.agents ?? []).find((a) => a.ens === ens);
     if (!matched) throw new Error(`coordinator did not pick up ${ens} after refresh: ${JSON.stringify(list, null, 2)}`);
     console.log(`coordinator sees ${list.count} agents, including ours: ${matched.tokenId}`);
 
     // ---- 4. fire a verify and look for the new oracle in participants ----
-    const verify = await (await fetch(`${BACKEND}/v1/verify`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    })).json();
-    const participants = verify?.decision?.consensus?.participants ?? verify?.participants ?? [];
-    const hit = JSON.stringify(verify).includes(ens) || participants.some((p: any) => p?.ens === ens);
+    const verifyBody = {
+      text: "registry smoke — github PR merged before deadline",
+      spec: {
+        kind: "github_pr_merged_before" as const,
+        repo: "octocat/Hello-World",
+        prNumber: 1,
+        deadlineIso: "2099-12-31T23:59:59.000Z",
+      },
+    };
+    const verify = (await fetchJson("POST", `${BACKEND}/v1/verify`, verifyBody)) as Record<
+      string,
+      unknown
+    >;
+    const responses = Array.isArray(verify.responses) ? (verify.responses as { ens?: string }[]) : [];
+    const decision = verify.decision as { outcome?: string; participants?: { ens?: string }[] } | undefined;
+    const participants = Array.isArray(decision?.participants) ? decision!.participants! : [];
+    const hit =
+      responses.some((r) => r.ens === ens)
+      || participants.some((p) => p.ens === ens)
+      || JSON.stringify(verify).includes(ens);
     console.log(`/v1/verify -> outcome=${verify?.decision?.outcome ?? "?"} routed-to-fake=${hit}`);
     if (!hit) {
       console.error("expected the smoke agent to participate. Full response:");

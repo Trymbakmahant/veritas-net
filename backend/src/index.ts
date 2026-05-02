@@ -5,6 +5,7 @@ import {
   AgentRequest,
   AgentRequestSchema,
   AgentResponse,
+  AgentResponseSchema,
   ClaimSpecSchema,
   CriticVerdict,
   Outcome,
@@ -50,6 +51,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
 const RESOLVABILITY_THRESHOLD = Number(process.env.RESOLVABILITY_THRESHOLD ?? "0.5");
 const AGREEMENT_THRESHOLD     = Number(process.env.AGREEMENT_THRESHOLD ?? "0.67");
+const AXL_VOTE_WINDOW_MS      = Number(process.env.AXL_VOTE_WINDOW_MS ?? "4000");
 
 // Auto-resolve a claim once submitted+resolveBy reached (for demo).
 const AUTO_RESOLVE = (process.env.AUTO_RESOLVE ?? "true") !== "false";
@@ -104,16 +106,147 @@ function pickRegistry(spec: AgentRequest["spec"]): RegistryEntry[] {
   return registry.pickFor(spec.kind, 2);
 }
 
+type SwarmResponse = AgentResponse & { identity: OracleIdentity; reputation?: number };
+
+type Candidate = {
+  name: string;
+  aliases: string[];
+  identity: OracleIdentity;
+  reputation?: number;
+  entry?: RegistryEntry;
+};
+
+function candidateForEntry(entry: RegistryEntry): Candidate {
+  return {
+    name: entry.manifest.name,
+    aliases: [
+      entry.manifest.name,
+      `${entry.manifest.name}-agent`,
+      entry.ens.replace(/\.veritas\.eth$/, ""),
+    ],
+    identity: {
+      tokenId: entry.tokenId,
+      ens: entry.ens,
+      version: entry.version,
+    },
+    reputation: entry.reputation,
+    entry,
+  };
+}
+
+function matchCandidate(candidates: Candidate[], agent: string): Candidate | undefined {
+  const normalized = agent.toLowerCase();
+  return candidates.find((c) => c.aliases.map((a) => a.toLowerCase()).includes(normalized));
+}
+
+async function publishSignedVote(args: {
+  signer: ethers.Signer;
+  claimId: bigint;
+  response: AgentResponse;
+  identity: OracleIdentity;
+}) {
+  const vote = await signVote({
+    signer: args.signer,
+    tokenId: args.identity.tokenId,
+    claimId: args.claimId,
+    outcome: args.response.outcome,
+    resolvable: args.response.resolvable,
+    confidence: args.response.confidence,
+    reasoning: args.response.reasoning,
+    evidence: args.response.evidence,
+    zgReceipt: args.response.zgReceipt,
+  });
+  await axl.publish(Channels.vote(args.claimId), {
+    kind: "signed_vote",
+    ...vote,
+    tokenId: vote.tokenId.toString(),
+    claimId: vote.claimId.toString(),
+  });
+  await appendLog(ZgStreams.claimAgentResponses(args.claimId.toString()), {
+    ens: args.identity.ens,
+    tokenId: args.identity.tokenId.toString(),
+    ...args.response,
+  });
+}
+
+async function collectAxlAgentResponses(args: {
+  request: AgentRequest;
+  claimId: bigint;
+  candidates: Candidate[];
+  signer: ethers.Signer;
+}): Promise<SwarmResponse[]> {
+  if (axlMode !== "real" || args.candidates.length === 0) return [];
+
+  return new Promise<SwarmResponse[]>((resolve) => {
+    const out: SwarmResponse[] = [];
+    const seen = new Set<string>();
+    const off = axl.subscribe(Channels.vote(args.claimId), (msg) => {
+      const payload = (msg as any)?.kind ? msg : (msg as any)?.payload;
+      if (!payload || payload.kind !== "agent_response") return;
+      if (String(payload.claimId) !== args.claimId.toString()) return;
+
+      const parsed = AgentResponseSchema.safeParse(payload.response);
+      if (!parsed.success) {
+        console.warn(`AXL vote ignored: invalid AgentResponse from ${payload.agent ?? "unknown"}`);
+        return;
+      }
+      const candidate = matchCandidate(args.candidates, parsed.data.agent)
+        ?? matchCandidate(args.candidates, String(payload.agent ?? ""));
+      if (!candidate) {
+        console.warn(`AXL vote ignored: no registered identity for agent=${parsed.data.agent}`);
+        return;
+      }
+      const key = candidate.identity.tokenId.toString();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ ...parsed.data, identity: candidate.identity, reputation: candidate.reputation });
+    });
+
+    void axl.publish(Channels.claimDispatch, {
+      claimId: args.claimId.toString(),
+      request: args.request,
+      expectedAgents: args.candidates.map((c) => ({
+        name: c.name,
+        ens: c.identity.ens,
+        tokenId: c.identity.tokenId.toString(),
+        capabilities: c.entry?.manifest.capabilities ?? [],
+      })),
+    }).catch((e) => console.warn(`AXL dispatch failed: ${(e as Error).message}`));
+
+    setTimeout(() => {
+      off();
+      resolve(out);
+    }, AXL_VOTE_WINDOW_MS);
+  }).then(async (responses) => {
+    await Promise.all(
+      responses.map((r) =>
+        publishSignedVote({
+          signer: args.signer,
+          claimId: args.claimId,
+          response: r,
+          identity: r.identity,
+        }),
+      ),
+    );
+    return responses;
+  });
+}
+
 async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signer) {
   const entries = pickRegistry(req.spec);
 
-  // Publish dispatch on AXL (informational; in mock mode there are no remote subs).
-  await axl.publish(Channels.claimDispatch, { claimId: claimId.toString(), request: req });
-
-  const responses: Array<AgentResponse & { identity: OracleIdentity; reputation?: number }> = [];
+  const responses: SwarmResponse[] = [];
 
   // ---- Path A: registry-backed dispatch ---------------------------------
   if (entries.length > 0) {
+    const candidates = entries.map(candidateForEntry);
+    const axlResponses = await collectAxlAgentResponses({ request: req, claimId, candidates, signer });
+    if (axlResponses.length > 0) {
+      console.log(`AXL swarm #${claimId}: collected ${axlResponses.length}/${candidates.length} registry response(s)`);
+      return axlResponses;
+    }
+    await axl.publish(Channels.claimDispatch, { claimId: claimId.toString(), request: req, fallback: "http" });
+
     await Promise.all(
       entries.map(async (entry) => {
         const identity: OracleIdentity = {
@@ -124,26 +257,11 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
         try {
           const resp = await callAgentByManifest(entry.manifest, req);
           responses.push({ ...resp, identity, reputation: entry.reputation });
-          const vote = await signVote({
+          await publishSignedVote({
             signer,
-            tokenId: identity.tokenId,
             claimId,
-            outcome: resp.outcome,
-            resolvable: resp.resolvable,
-            confidence: resp.confidence,
-            reasoning: resp.reasoning,
-            evidence: resp.evidence,
-            zgReceipt: resp.zgReceipt,
-          });
-          await axl.publish(Channels.vote(claimId), {
-            ...vote,
-            tokenId: vote.tokenId.toString(),
-            claimId: vote.claimId.toString(),
-          });
-          await appendLog(ZgStreams.claimAgentResponses(claimId.toString()), {
-            ens: identity.ens,
-            tokenId: identity.tokenId.toString(),
-            ...resp,
+            response: resp,
+            identity,
           });
         } catch (e) {
           responses.push({
@@ -173,6 +291,19 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
     return { name: n, identity: id, reputation: rep };
   })));
 
+  const fallbackCandidates: Candidate[] = identities.map(({ name, identity, reputation }) => ({
+    name,
+    aliases: [name, `${name}-agent`],
+    identity,
+    reputation,
+  }));
+  const axlResponses = await collectAxlAgentResponses({ request: req, claimId, candidates: fallbackCandidates, signer });
+  if (axlResponses.length > 0) {
+    console.log(`AXL swarm #${claimId}: collected ${axlResponses.length}/${fallbackCandidates.length} fallback response(s)`);
+    return axlResponses;
+  }
+  await axl.publish(Channels.claimDispatch, { claimId: claimId.toString(), request: req, fallback: "http" });
+
   await Promise.all(
     identities.map(async ({ name, identity, reputation }) => {
       try {
@@ -180,26 +311,11 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
           ? await callGithubAgent(GITHUB_AGENT_URL, req, GITHUB_TOKEN || undefined)
           : await callSnapshotAgent(SNAPSHOT_AGENT_URL, req);
         responses.push({ ...resp, identity, reputation });
-        const vote = await signVote({
+        await publishSignedVote({
           signer,
-          tokenId: identity.tokenId,
           claimId,
-          outcome: resp.outcome,
-          resolvable: resp.resolvable,
-          confidence: resp.confidence,
-          reasoning: resp.reasoning,
-          evidence: resp.evidence,
-          zgReceipt: resp.zgReceipt,
-        });
-        await axl.publish(Channels.vote(claimId), {
-          ...vote,
-          tokenId: vote.tokenId.toString(),
-          claimId: vote.claimId.toString(),
-        });
-        await appendLog(ZgStreams.claimAgentResponses(claimId.toString()), {
-          ens: identity.ens,
-          tokenId: identity.tokenId.toString(),
-          ...resp,
+          response: resp,
+          identity,
         });
       } catch (e) {
         responses.push({

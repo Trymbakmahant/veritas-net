@@ -52,6 +52,8 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const RESOLVABILITY_THRESHOLD = Number(process.env.RESOLVABILITY_THRESHOLD ?? "0.5");
 const AGREEMENT_THRESHOLD     = Number(process.env.AGREEMENT_THRESHOLD ?? "0.67");
 const AXL_VOTE_WINDOW_MS      = Number(process.env.AXL_VOTE_WINDOW_MS ?? "4000");
+const REGISTRY_TARGET_RESPONSES = Number(process.env.REGISTRY_TARGET_RESPONSES ?? "2");
+const REGISTRY_CANDIDATE_LIMIT  = Number(process.env.REGISTRY_CANDIDATE_LIMIT ?? "5");
 
 // Auto-resolve a claim once submitted+resolveBy reached (for demo).
 const AUTO_RESOLVE = (process.env.AUTO_RESOLVE ?? "true") !== "false";
@@ -103,7 +105,7 @@ function parseSpec(specRaw: string) {
 const registry = new AgentRegistry(envFallback());
 
 function pickRegistry(spec: AgentRequest["spec"]): RegistryEntry[] {
-  return registry.pickFor(spec.kind, 2);
+  return registry.pickFor(spec.kind, Math.max(REGISTRY_TARGET_RESPONSES, REGISTRY_CANDIDATE_LIMIT));
 }
 
 type SwarmResponse = AgentResponse & { identity: OracleIdentity; reputation?: number };
@@ -247,37 +249,38 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
     }
     await axl.publish(Channels.claimDispatch, { claimId: claimId.toString(), request: req, fallback: "http" });
 
-    await Promise.all(
-      entries.map(async (entry) => {
-        const identity: OracleIdentity = {
-          tokenId: entry.tokenId,
-          ens: entry.ens,
-          version: entry.version,
-        };
-        try {
-          const resp = await callAgentByManifest(entry.manifest, req);
-          responses.push({ ...resp, identity, reputation: entry.reputation });
-          await publishSignedVote({
-            signer,
-            claimId,
-            response: resp,
-            identity,
-          });
-        } catch (e) {
-          responses.push({
-            agent: entry.manifest.name,
-            resolvable: false,
-            outcome: "INVALID" as Outcome,
-            confidence: 0.2,
-            evidence: [],
-            reasoning: `Agent call failed: ${(e as Error).message}`,
-            identity,
-            reputation: entry.reputation,
-          });
-        }
-      }),
-    );
-    return responses;
+    const failures: SwarmResponse[] = [];
+    for (const entry of entries) {
+      const identity: OracleIdentity = {
+        tokenId: entry.tokenId,
+        ens: entry.ens,
+        version: entry.version,
+      };
+      try {
+        const resp = await callAgentByManifest(entry.manifest, req);
+        responses.push({ ...resp, identity, reputation: entry.reputation });
+        await publishSignedVote({
+          signer,
+          claimId,
+          response: resp,
+          identity,
+        });
+        if (responses.length >= REGISTRY_TARGET_RESPONSES) break;
+      } catch (e) {
+        console.warn(`registry agent skipped (${entry.ens} ${entry.manifest.endpoint}): ${(e as Error).message}`);
+        failures.push({
+          agent: entry.manifest.name,
+          resolvable: false,
+          outcome: "INVALID" as Outcome,
+          confidence: 0.2,
+          evidence: [],
+          reasoning: `Agent call failed: ${(e as Error).message}`,
+          identity,
+          reputation: entry.reputation,
+        });
+      }
+    }
+    return responses.length > 0 ? responses : failures;
   }
 
   // ---- Path B: legacy hardcoded fallback (no registered agent matched) --

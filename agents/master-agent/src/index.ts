@@ -6,6 +6,7 @@ import { startAxlAgent } from "../../shared/axl-agent.js";
 
 const PORT = Number(process.env.PORT ?? "8810");
 const DEXSCREENER_API_BASE = (process.env.DEXSCREENER_API_BASE ?? "https://api.dexscreener.com").replace(/\/$/, "");
+const AGENT_NAME = process.env.AGENT_NAME ?? process.env.AXL_PEER_ID ?? "master-agent";
 
 const GithubSpecSchema = z.object({
   kind: z.literal("github_pr_merged_before"),
@@ -95,7 +96,7 @@ async function verifyGithub(req: VerifyRequest) {
   const passed = !!mergedAt && mergedAt.getTime() <= deadline.getTime();
 
   return {
-    agent: "master-agent",
+    agent: AGENT_NAME,
     resolvable: true,
     outcome: passed ? "YES" as const : "NO" as const,
     confidence: 0.9,
@@ -131,7 +132,7 @@ async function verifySnapshot(req: VerifyRequest) {
   const p = json.data?.proposal;
   if (!p) {
     return {
-      agent: "master-agent",
+      agent: AGENT_NAME,
       resolvable: false,
       outcome: "INVALID" as const,
       confidence: 0.6,
@@ -141,7 +142,7 @@ async function verifySnapshot(req: VerifyRequest) {
   }
   if (p.space.id !== spec.space) {
     return {
-      agent: "master-agent",
+      agent: AGENT_NAME,
       resolvable: false,
       outcome: "INVALID" as const,
       confidence: 0.6,
@@ -151,7 +152,7 @@ async function verifySnapshot(req: VerifyRequest) {
   }
   if (!["closed", "final"].includes(p.state.toLowerCase())) {
     return {
-      agent: "master-agent",
+      agent: AGENT_NAME,
       resolvable: true,
       outcome: "ESCALATE" as const,
       confidence: 0.55,
@@ -164,7 +165,7 @@ async function verifySnapshot(req: VerifyRequest) {
   const winner = p.choices[best] ?? "";
   const passed = ["yes", "for", "approve", "accept"].includes(winner.trim().toLowerCase());
   return {
-    agent: "master-agent",
+    agent: AGENT_NAME,
     resolvable: true,
     outcome: passed ? "YES" as const : "NO" as const,
     confidence: 0.8,
@@ -191,7 +192,7 @@ async function verifyTokenPrice(req: VerifyRequest) {
   const deadline = asDate(spec.deadlineIso);
   if (Date.now() < deadline.getTime()) {
     return {
-      agent: "master-agent",
+      agent: AGENT_NAME,
       resolvable: true,
       outcome: "ESCALATE" as const,
       confidence: 0.55,
@@ -209,7 +210,7 @@ async function verifyTokenPrice(req: VerifyRequest) {
     .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
   if (!pair) {
     return {
-      agent: "master-agent",
+      agent: AGENT_NAME,
       resolvable: false,
       outcome: "INVALID" as const,
       confidence: 0.5,
@@ -222,7 +223,7 @@ async function verifyTokenPrice(req: VerifyRequest) {
   const passed = spec.direction === "above" ? price >= spec.targetPriceUsd : price <= spec.targetPriceUsd;
   const comparator = spec.direction === "above" ? ">=" : "<=";
   return {
-    agent: "master-agent",
+    agent: AGENT_NAME,
     resolvable: true,
     outcome: passed ? "YES" as const : "NO" as const,
     confidence: pair.liquidity?.usd ? 0.82 : 0.68,
@@ -332,7 +333,7 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({
   ok: true,
-  agent: "master-agent",
+  agent: AGENT_NAME,
   capabilities: ["github_pr_merged_before", "snapshot_proposal_passed", "token_price_target", "critic"],
   axl: !!process.env.AXL_HTTP_URL,
   zgCompute: !!(process.env.ZG_COMPUTE_API_URL && process.env.ZG_COMPUTE_API_KEY && process.env.ZG_COMPUTE_MODEL),
@@ -360,7 +361,7 @@ app.listen(PORT, () => {
 });
 
 startAxlAgent({
-  agentName: "master-agent",
+  agentName: AGENT_NAME,
   capabilities: ["github_pr_merged_before", "snapshot_proposal_passed", "token_price_target"],
   verify: (req) => verify(req),
 });

@@ -1,0 +1,10 @@
+{
+  "schema": "veritas.agent.v1",
+  "name": "token-price",
+  "displayName": "Token price target oracle",
+  "endpoint": "http://localhost:8805",
+  "capabilities": ["token_price_target"],
+  "description": "Resolves whether a token price was above or below a USD target at a deadline using DEXScreener evidence.",
+  "signer": "0x0000000000000000000000000000000000000000",
+  "version": "0.1.0"
+}

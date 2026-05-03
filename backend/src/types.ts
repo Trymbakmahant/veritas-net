@@ -34,6 +34,14 @@ export const ClaimSpecSchema = z.discriminatedUnion("kind", [
     space: z.string().min(1),
     proposalId: z.string().min(1),
   }),
+  z.object({
+    kind: z.literal("token_price_target"),
+    chainId: z.string().min(1),
+    tokenAddress: z.string().min(1),
+    targetPriceUsd: z.number().positive(),
+    direction: z.enum(["above", "below"]).default("above"),
+    deadlineIso: z.string().min(1),
+  }),
 ]);
 export type ClaimSpec = z.infer<typeof ClaimSpecSchema>;
 

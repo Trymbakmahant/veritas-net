@@ -17,6 +17,7 @@ import {
   callAgentByManifest,
   callGithubAgent,
   callSnapshotAgent,
+  callTokenPriceAgent,
 } from "./agents.js";
 import { decide, votePayloadFromResponse } from "./coordinator.js";
 import { axl, axlMode, Channels } from "./axl.js";
@@ -46,6 +47,7 @@ const INFT_ADDRESS = process.env.ORACLE_INFT_ADDRESS ?? "";
 
 const GITHUB_AGENT_URL = process.env.GITHUB_AGENT_URL ?? "http://localhost:8801";
 const SNAPSHOT_AGENT_URL = process.env.SNAPSHOT_AGENT_URL ?? "http://localhost:8802";
+const TOKEN_PRICE_AGENT_URL = process.env.TOKEN_PRICE_AGENT_URL ?? "http://localhost:8805";
 const AUDITOR_AGENT_URL = process.env.AUDITOR_AGENT_URL ?? "http://localhost:8803";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
@@ -284,10 +286,13 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
   }
 
   // ---- Path B: legacy hardcoded fallback (no registered agent matched) --
-  type AgentName = "github" | "snapshot";
-  const fallbackSet: AgentName[] = req.spec.kind === "github_pr_merged_before"
-    ? ["github", "github"]
-    : ["snapshot", "snapshot"];
+  type AgentName = "github" | "snapshot" | "token-price";
+  const fallbackSet: AgentName[] =
+    req.spec.kind === "github_pr_merged_before"
+      ? ["github", "github"]
+      : req.spec.kind === "snapshot_proposal_passed"
+      ? ["snapshot", "snapshot"]
+      : ["token-price"];
 
   const identities = await Promise.all(fallbackSet.map((n) => identityFor(n).then(async (id) => {
     const rep = await reputationOf(id.tokenId);
@@ -312,7 +317,9 @@ async function runSwarm(req: AgentRequest, claimId: bigint, signer: ethers.Signe
       try {
         const resp = name === "github"
           ? await callGithubAgent(GITHUB_AGENT_URL, req, GITHUB_TOKEN || undefined)
-          : await callSnapshotAgent(SNAPSHOT_AGENT_URL, req);
+          : name === "snapshot"
+          ? await callSnapshotAgent(SNAPSHOT_AGENT_URL, req)
+          : await callTokenPriceAgent(TOKEN_PRICE_AGENT_URL, req);
         responses.push({ ...resp, identity, reputation });
         await publishSignedVote({
           signer,

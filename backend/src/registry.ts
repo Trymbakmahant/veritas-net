@@ -167,7 +167,7 @@ export class AgentRegistry {
  * Build the env fallback map from `AGENT_ENDPOINTS` so existing GitHub /
  * Snapshot / Auditor agents keep working before they have real manifests.
  *
- * Format: `AGENT_ENDPOINTS=github=http://localhost:8801,snapshot=http://localhost:8802`
+ * Format: `AGENT_ENDPOINTS=github=http://localhost:8801,snapshot=http://localhost:8802,token-price=http://localhost:8805`
  *
  * `capabilities` come from a sibling `AGENT_CAPABILITIES` env var:
  *   AGENT_CAPABILITIES=github=github_pr_merged_before,snapshot=snapshot_proposal_passed
@@ -209,6 +209,7 @@ function defaultCapabilityFor(name: string): string | null {
   switch (name) {
     case "github": return "github_pr_merged_before";
     case "snapshot": return "snapshot_proposal_passed";
+    case "token-price": return "token_price_target";
     case "auditor": return "critic";
     default: return null;
   }

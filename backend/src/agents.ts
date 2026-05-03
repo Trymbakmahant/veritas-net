@@ -27,6 +27,11 @@ export async function callSnapshotAgent(agentUrl: string, req: AgentRequest): Pr
   return AgentResponseSchema.parse(json);
 }
 
+export async function callTokenPriceAgent(agentUrl: string, req: AgentRequest): Promise<AgentResponse> {
+  const json = await postJson(`${agentUrl.replace(/\/$/, "")}/verify`, req);
+  return AgentResponseSchema.parse(json);
+}
+
 /**
  * Generic dispatcher used by the dynamic registry. Posts AgentRequest to
  * `${manifest.endpoint}/verify`, optionally with a per-manifest auth header.

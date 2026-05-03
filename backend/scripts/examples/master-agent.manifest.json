@@ -1,0 +1,10 @@
+{
+  "schema": "veritas.agent.v1",
+  "name": "master-agent",
+  "displayName": "Veritas master agent",
+  "endpoint": "http://localhost:8810",
+  "capabilities": ["github_pr_merged_before", "snapshot_proposal_passed", "token_price_target"],
+  "description": "Single deployable agent service that verifies GitHub, Snapshot, and token price claims.",
+  "signer": "0x0000000000000000000000000000000000000000",
+  "version": "0.1.0"
+}

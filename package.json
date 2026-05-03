@@ -16,6 +16,7 @@
     "dev:github":      "npm --workspace veritas-github-agent run dev",
     "dev:snapshot":    "npm --workspace veritas-snapshot-agent run dev",
     "dev:token":       "npm --workspace veritas-token-price-agent run dev",
+    "dev:master":      "npm --workspace veritas-master-agent run dev",
     "dev:auditor":     "npm --workspace veritas-adversarial-auditor-agent run dev",
     "dev:backend":     "npm --workspace veritas-backend run dev",
     "dev:frontend":    "npm --workspace veritas-frontend run dev",
